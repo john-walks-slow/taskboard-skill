@@ -40,7 +40,7 @@ class TaskTest(unittest.TestCase):
   with tempfile.TemporaryDirectory() as d:
    self.runcli(d,'init');a=self.runcli(d,'add','A').stdout.strip();self.runcli(d,'doing',a,env={'CODEX_THREAD_ID':'s1'})
    p=Path(d)/'AGENTS.md';p.write_text('# My rules\n\nKeep this.\n');self.runcli(d,'sync')
-   txt=p.read_text();self.assertIn('Keep this.',txt);self.assertIn('In Progress',txt);self.assertIn(a,txt)
+   txt=p.read_text();self.assertIn('Keep this.',txt);self.assertIn('In Progress',txt);self.assertIn('Load and follow the `taskboard` skill',txt);self.assertIn(a,txt)
  def test_custom_harness_identity(self):
   with tempfile.TemporaryDirectory() as d:
    self.runcli(d,'init');p=Path(d)/'.taskboard/config.json';c=json.loads(p.read_text());c['harness_env']['my-harness']=['MY_SID'];p.write_text(json.dumps(c))

@@ -428,7 +428,7 @@ def sync(root,dry=False,quiet=False):
         if not quiet:print('No context_file configured.')
         return
     ts=read_tasks(root); limit=int(c.get('max_context_tasks',30))
-    lines=[START,'## Shared Task Board']
+    lines=[START,'## Shared Task Board','','> **Mandatory:** Load and follow the `taskboard` skill before starting, claiming, updating, or handing off any task in this repository.']
     for heading,st in [('In Progress','IN_PROGRESS'),('Ready Tasks','READY'),('Waiting','WAITING'),('Blocked','BLOCKED')]:
         lines.extend(['',f'### {heading}']); group=[t for t in ts.values() if status(t,ts)==st]
         for t in sorted(group,key=lambda x:x.get('created_at',''))[:limit]:
