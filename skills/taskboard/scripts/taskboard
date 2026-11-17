@@ -120,6 +120,7 @@ def init(context_files):
             base['context_file']=[context_files] if isinstance(context_files,str) else context_files
         atomic(p['config'],json.dumps(base,indent=2)+'\n')
     if not p['events'].exists(): atomic(p['events'],'')
+    auto_sync(root)
     print('Initialized',p['dir'])
 def detect(root,harness=None,sid=None):
     if sid:

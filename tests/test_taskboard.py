@@ -137,6 +137,9 @@ class TaskTest(unittest.TestCase):
  def test_auto_sync_on_state_change_and_config_override(self):
   with tempfile.TemporaryDirectory() as d:
    self.runcli(d,'init')
+   agents=Path(d)/'AGENTS.md'
+   self.assertTrue(agents.exists())
+   self.assertIn('ALWAYS load and follow the `taskboard` skill',agents.read_text())
    a=self.runcli(d,'add','Auto sync task').stdout.strip()
    self.assertTrue(a.startswith('t-'))
    self.assertNotIn('\n',a)
@@ -250,7 +253,7 @@ class TaskTest(unittest.TestCase):
   with tempfile.TemporaryDirectory() as d:
    self.runcli(d,'init')
    pcfg=Path(d)/'.taskboard'/'config.json'
-   c=json.loads(pcfg.read_text());c['auto_sync']=False;pcfg.write_text(json.dumps(c))
+   c=json.loads(pcfg.read_text());c['auto_sync']=False;pcfg.write_text(json.dumps(c));(Path(d)/'AGENTS.md').unlink(missing_ok=True)
    a=self.runcli(d,'add','Fix OAuth login flow').stdout.strip()
    b=self.runcli(d,'add','Setup Redis cache').stdout.strip()
    d2=self.runcli(d,'add','Login via OAuth callback').stdout.strip()
