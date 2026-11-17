@@ -2,11 +2,11 @@
 
 A lightweight, filesystem-native task board for coordinating multi-agent coding work across sessions. Zero database, zero daemon, zero third-party dependencies (Python 3.9+).
 
-一个基于本地文件系统的轻量多 Agent 共享任务看板，支持任务状态流转、依赖阻塞等待、纯标准库 BM25F 检索，以及多上下文文件（`AGENTS.md` / `CLAUDE.md` 等）自动同步。
+一个基于本地文件系统的轻量多 Agent 共享任务看板，支持任务状态流转、条件与事件阻塞监听、纯标准库 BM25F 检索，以及多上下文文件（`AGENTS.md` / `CLAUDE.md` 等）自动同步。
 
-- **Markdown + YAML frontmatter** per task under `.taskboard/tasks/`, paired with an append-only `events.jsonl` history.
-- **Automatic actor attribution**: detects the active Harness type and real session ID automatically on state changes.
-- **DAG dependencies & blocking wait**: `dep add --wait` and `wait` block until prerequisites finish, failing fast on blockers.
+- **Markdown + YAML frontmatter** per task under the selected Board’s `tasks/` directory, paired with an append-only `events.jsonl` history.
+- **Explicit task assignment**: one current assignee per task; `assign --claim`, `add --claim`, and `doing` make assignment part of the normal workflow. Assignment writes are atomic under the Board lock.
+- **DAG dependencies, task wait & Board watch**: `wait` blocks on one task's state; `watch` listens for events across a Board.
 - **BM25F multi-field search**: supports boolean queries, inline filters, camelCase/snake_case splitting, CJK bigrams, and fuzzy fallback.
 - **Automatic board sync**: refreshes configured context files on every task state change.
 
@@ -21,18 +21,18 @@ python .agents/skills/taskboard/scripts/taskboard init --context-file AGENTS.md
 Inside any supported Harness shell:
 
 ```bash
-taskboard add "Normalize URL identity" --desc "Align canonical host/path rules"
+taskboard add "Normalize URL identity" --desc "Align canonical host/path rules" --claim
 taskboard list
-taskboard doing t-xxxxxxxx
-taskboard note t-xxxxxxxx "Added host normalization tests"
+taskboard --board default doing t-xxxxxxxx
+taskboard --board default note t-xxxxxxxx "Added host normalization tests"
 taskboard status
-taskboard done t-xxxxxxxx --note "All unit tests passing"
+taskboard --board default done t-xxxxxxxx --note "All unit tests passing"
 ```
 
-`doing`, `note`, `done`, `block`, and `handoff` automatically detect the active Harness and session ID. If auto-detection is unavailable, pass them explicitly:
+`doing`, `note`, `done`, `block`, `handoff`, `assign`, and `unassign` automatically detect the active Harness and session ID. `doing` automatically assigns an unassigned task to the current session; it refuses to start a task assigned to another session. `--board NAME` must appear before the command. If auto-detection is unavailable, pass them explicitly:
 
 ```bash
-taskboard doing t-xxxxxxxx --harness codex --sid REAL_THREAD_ID
+taskboard --board default doing t-xxxxxxxx --harness codex --sid REAL_THREAD_ID
 ```
 
 ## Supported Harnesses
@@ -68,21 +68,25 @@ Copy or symlink `skills/taskboard` into the skill directory for your Harness:
 
 ```text
 taskboard init [--context-file FILE ...]
-taskboard add TITLE [--desc TEXT]
-taskboard list [--all]
-taskboard show TASK_ID
-taskboard doing TASK_ID
-taskboard note TASK_ID MESSAGE
-taskboard done TASK_ID [--note TEXT]
-taskboard block TASK_ID --reason TEXT
-taskboard unblock TASK_ID
-taskboard dep add TASK_ID --needs OTHER_TASK_ID [--wait] [--timeout SECONDS]
-taskboard wait TASK_ID [TASK_ID ...] [--ready] [--timeout SECONDS]
-taskboard handoff TASK_ID --to REAL_SID [--to-harness NAME] [--note TEXT]
-taskboard status
-taskboard search [QUERY ...] [--status STATUS] [--harness NAME] [--sid SID] [--tasks-only | --events-only] [--since ISO_DATE] [--limit N] [--exact] [--json]
-taskboard sync [--dry-run]
-taskboard context
+taskboard board create NAME | list | show NAME | use NAME | delete NAME [--force]
+taskboard [--board NAME] add TITLE [--desc TEXT] [--claim | --to SID --to-harness HARNESS]
+taskboard [--board NAME] list [--all]
+taskboard [--board NAME] show TASK_ID
+taskboard [--board NAME] assign TASK_ID (--claim | --to SID --to-harness HARNESS) [--force]
+taskboard [--board NAME] unassign TASK_ID [--force]
+taskboard [--board NAME] doing TASK_ID
+taskboard [--board NAME] note TASK_ID MESSAGE
+taskboard [--board NAME] done TASK_ID [--note TEXT]
+taskboard [--board NAME] block TASK_ID --reason TEXT
+taskboard [--board NAME] unblock TASK_ID
+taskboard [--board NAME] dep add TASK_ID --needs OTHER_TASK_ID [--wait] [--timeout SECONDS]
+taskboard [--board NAME] wait TASK_ID [--until done|doing|ready|waiting|blocked] [--timeout SECONDS] [--json]
+taskboard [--board NAME] watch [--event TYPE] [--since CURSOR] [--timeout SECONDS] [--json]
+taskboard [--board NAME] handoff TASK_ID --to REAL_SID [--to-harness NAME] [--note TEXT]
+taskboard [--board NAME] status
+taskboard [--board NAME] search [QUERY ...] [--status STATUS] [--harness NAME] [--sid SID] [--tasks-only | --events-only] [--since ISO_DATE] [--limit N] [--exact] [--json]
+taskboard [--board NAME] sync [--dry-run]
+taskboard [--board NAME] context
 ```
 
 ## Search
@@ -102,48 +106,94 @@ taskboard search --since 2026-11-01 --limit 10 --json
 - Automatically splits `camelCase`, `snake_case`, `kebab-case`, and CJK bigrams.
 - Falls back to fuzzy matching on typos unless `--exact` is passed.
 
-## Blocking wait
+## Boards
 
-Use `taskboard wait` or `taskboard dep add ... --wait` to block until prerequisite tasks finish:
+Every task belongs to exactly one Board. The existing `.taskboard/tasks/` and `.taskboard/events.jsonl` remain the `default` Board, so existing projects need no migration. Named Boards live under `.taskboard/boards/NAME/`. Task IDs are scoped to a Board; dependencies cannot cross Board boundaries.
 
 ```bash
-# Add dependency and wait for OTHER_TASK_ID to become DONE
-taskboard dep add t-bbbbbbbb --needs t-aaaaaaaa --wait
+taskboard board create frontend
+taskboard board create research
+taskboard board list
+taskboard board show frontend
 
-# Wait for one or more tasks to become DONE
-taskboard wait t-aaaaaaaa t-cccccccc
+# --board is a global option and goes before the command
+taskboard --board frontend add "Implement login"
+taskboard --board frontend list
 
-# Wait until all dependencies of a task are DONE (no longer WAITING)
-taskboard wait t-bbbbbbbb --ready --timeout 120
+# Set the project default; explicit --board always overrides it
+taskboard board use frontend
+taskboard add "Use the selected board"
+
+# Deleting a non-empty board requires an explicit --force
+taskboard board delete research --force
 ```
 
-- Polls every 1 second and releases the project lock between polls so other sessions can run `done` or `block` without deadlocking.
-- `--timeout` is optional; if a waited-on task or prerequisite becomes `BLOCKED`, `wait` exits immediately with an error.
+The project config is shared by all Boards. A named Board may optionally have its own `config.json` overrides. Automatic context sync reflects the Board selected for the command; it does not merge task summaries from every Board.
+
+## Task wait and Board watch
+
+These commands have deliberately separate scopes:
+
+- `wait` observes **one task** and returns when its current state reaches the requested condition.
+- `watch` observes **the entire selected Board's event stream** and returns when a new event arrives. It does not accept task IDs or state conditions.
+
+```bash
+# Wait for one task to finish (returns immediately if already DONE)
+taskboard wait t-aaaaaaaa
+taskboard wait t-bbbbbbbb --until ready --timeout 120
+
+# Add a dependency, then wait for its prerequisite to finish
+taskboard dep add t-bbbbbbbb --needs t-aaaaaaaa --wait
+
+# Listen for the next event anywhere on the selected Board
+taskboard --board frontend watch --event task.created --json
+
+# Resume from a previously returned event cursor
+taskboard --board frontend watch --since 1234 --json
+```
+
+- Both commands poll every 250 ms and release the Board lock between polls.
+- `wait` checks current state first, so already-satisfied conditions return immediately. It fails fast if the task or one of its prerequisites is blocked and the requested condition cannot be reached.
+- `watch` starts at the current event-log offset by default. `--json` returns a machine-readable event and byte-offset `cursor`; pass it to `--since CURSOR` to resume without replaying the matched event.
+- Dotted event names are accepted (`task.created` maps to the stored `task_created` type). `--timeout` is optional.
+
+### Background watcher for Agent Harnesses
+
+In supported Harnesses, run `taskboard watch` using the Harness's **background execution mode**. Do not occupy the foreground Agent call with a long-running watcher. A Coordinator should retain and monitor the background process handle, consume the event when it exits, handle the task, then restart the watcher. The exact background mechanism is Harness-specific; do not assume shell `&` is sufficient.
+
+Tasks created with `taskboard add` automatically append a `task_created` event, so a Board watcher can detect CLI-created tasks and let a Coordinator pick them up. Manually editing a task Markdown file does not emit an event; use the CLI for tasks that should trigger automatic dispatch. `watch` only reports events: it does not launch Workers. The CLI enforces one current assignee per task through atomic Board-locked assignment updates; it does not monitor whether a session is alive or automatically recover abandoned assignments.
 
 ## Files and task statuses
 
 ```text
 .taskboard/
 ├── config.json
-├── tasks/       # one Markdown record per task
-└── events.jsonl # append-only activity history
+├── tasks/       # default Board tasks
+├── events.jsonl # default Board append-only activity history
+└── boards/
+    ├── frontend/
+    │   ├── tasks/
+    │   └── events.jsonl
+    └── research/
+        ├── tasks/
+        └── events.jsonl
 ```
 
 Computed task statuses:
 
 - `DONE`: explicitly completed.
 - `BLOCKED`: explicitly blocked via `block`.
-- `IN_PROGRESS`: actively claimed via `doing`.
+- `IN_PROGRESS`: marked in progress via `doing`.
 - `WAITING`: has an unfinished dependency.
-- `READY`: available to claim.
+- `READY`: available for assignment or self-assignment.
 
-A `handoff` records the sender, recipient, and optional note, then returns the task to `READY` (or `WAITING` if dependencies remain) for the receiving session to claim.
+An `assign` sets the task’s single current assignee without changing its state. `doing` assigns an unassigned task to the current session and starts it atomically; it refuses if another session is assigned. `handoff` changes the assignee to the recipient and returns the task to `READY` (or `WAITING` if dependencies remain). `unassign` clears the assignee and returns an in-progress task to `READY`/`WAITING`; only the current assignee may do this normally, while the Coordinator can use `--force`. Reassignment requires `--force`.
 
 ## Configuration & automatic context sync
 
-Every task state change (`add`, `doing`, `done`, `block`, `unblock`, `note`, `dep add`, `handoff`) automatically updates the configured context files between `<!-- TASKBOARD:START -->` and `<!-- TASKBOARD:END -->`, preserving all surrounding content.
+Every task change (`add`, `assign`, `unassign`, `doing`, `done`, `block`, `unblock`, `note`, `dep add`, `handoff`) automatically updates the configured context files between `<!-- TASKBOARD:START -->` and `<!-- TASKBOARD:END -->`, preserving all surrounding content.
 
-Configuration is loaded in two layers (project overrides global; `harness_env` maps are merged):
+Configuration is loaded in three layers (project overrides global, optional Board config overrides project; `harness_env` maps are merged):
 - **Global**: `skills/taskboard/scripts/config.json`
 - **Project**: `.taskboard/config.json`
 
@@ -161,6 +211,6 @@ Set `"auto_sync": false` or `"context_file": []` to disable automatic sync. `TAS
 
 ## Reliability boundaries
 
-- Atomic file replacement and an OS-level project lock serialize CLI writers on a local filesystem.
+- Atomic file replacement and an OS-level lock per Board serialize CLI writers on a local filesystem.
 - Handoffs and SIDs are coordination records, not process control; Taskboard does not start, stop, or message external Agent processes.
 - Human edits to task Markdown are supported; manual edits to `events.jsonl` are not recommended.

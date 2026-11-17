@@ -68,7 +68,7 @@ class TaskTest(unittest.TestCase):
     self.runcli(d,'doing',a,env=env)
     out=self.runcli(d,'show',a).stdout
     self.assertIn(f'{harness}:{sid}',out)
- def test_wait_and_dep_add_wait(self):
+ def test_watch_and_dep_add_wait(self):
   with tempfile.TemporaryDirectory() as d:
    self.runcli(d,'init')
    a=self.runcli(d,'add','Prereq A').stdout.strip()
@@ -81,27 +81,27 @@ class TaskTest(unittest.TestCase):
    p=self.runcli(d,'dep','add',b,'--needs',a,'--wait','--timeout','3')
    th.join()
    self.assertIn('Dependency added',p.stdout)
-   self.assertIn('Done: '+a,p.stdout)
+   self.assertIn('DONE: '+a,p.stdout)
    self.assertIn('READY',self.runcli(d,'show',b).stdout)
- def test_wait_ready_and_blocked_and_timeout(self):
+ def test_watch_ready_and_blocked_and_timeout(self):
   with tempfile.TemporaryDirectory() as d:
    self.runcli(d,'init')
    a=self.runcli(d,'add','Prereq A').stdout.strip()
    b=self.runcli(d,'add','Child B').stdout.strip()
    self.runcli(d,'dep','add',b,'--needs',a)
-   p_to=self.runcli(d,'wait',b,'--ready','--timeout','0.15',ok=False)
+   p_to=self.runcli(d,'wait',b,'--until','ready','--timeout','0.15',ok=False)
    self.assertIn('timed out',p_to.stderr)
    def finish_a():
     time.sleep(0.15)
     self.runcli(d,'done',a,env={'PI_SESSION_ID':'pi-1'})
    th=threading.Thread(target=finish_a)
    th.start()
-   p_ready=self.runcli(d,'wait',b,'--ready','--timeout','3')
+   p_ready=self.runcli(d,'wait',b,'--until','ready','--timeout','3')
    th.join()
-   self.assertIn('Ready: '+b,p_ready.stdout)
+   self.assertIn('READY: '+b,p_ready.stdout)
    c=self.runcli(d,'add','Task C').stdout.strip()
    self.runcli(d,'block',c,'--reason','missing token',env={'DSH_SESSION_ID':'dsh-1'})
-   p_blk=self.runcli(d,'wait',c,'--timeout','1',ok=False)
+   p_blk=self.runcli(d,'wait',c,'--until','done','--timeout','1',ok=False)
    self.assertIn('blocked: missing token',p_blk.stderr)
  def test_search_bm25f_filters_cjk_fuzzy_and_json(self):
   with tempfile.TemporaryDirectory() as d:
@@ -195,7 +195,7 @@ class TaskTest(unittest.TestCase):
    e=os.environ.copy()
    for k in HARNESS_VARS:e.pop(k,None)
    p=subprocess.run([sys.executable,str(bin_cli),'--version'],cwd=d,env=e,text=True,capture_output=True)
-   self.assertEqual(p.returncode,0);self.assertIn('0.1.0',p.stdout)
+   self.assertEqual(p.returncode,0);self.assertIn('0.1.3',p.stdout)
    self.runcli(d,'init')
    a=self.runcli(d,'add','Task A').stdout.strip()
    b=self.runcli(d,'add','Task B').stdout.strip()
@@ -220,35 +220,30 @@ class TaskTest(unittest.TestCase):
    # Cannot claim DONE task
    self.runcli(d,'doing',a,env={'OPENCODE_SESSION_ID':'o1'},ok=False)
    # TASKBOARD_HARNESS + TASKBOARD_SID explicit override
+   self.runcli(d,'doing',b,env={'TASKBOARD_HARNESS':'custom-ci','TASKBOARD_SID':'ci-99'},ok=False)
+   self.runcli(d,'assign',b,'--to','ci-99','--to-harness','custom-ci','--force',env={'TASKBOARD_HARNESS':'coordinator','TASKBOARD_SID':'coord-1'})
    self.runcli(d,'doing',b,env={'TASKBOARD_HARNESS':'custom-ci','TASKBOARD_SID':'ci-99'})
    self.assertIn('custom-ci:ci-99',self.runcli(d,'show',b).stdout)
    # Path traversal in context_file rejected
    pcfg=Path(d)/'.taskboard'/'config.json'
    c=json.loads(pcfg.read_text());c['context_file']=['../escape.md'];pcfg.write_text(json.dumps(c))
    self.assertIn('inside project root',self.runcli(d,'sync',ok=False).stderr)
- def test_wait_multiple_and_prereq_blocked_and_already_done(self):
+ def test_wait_task_ready_blocked_and_already_done(self):
   with tempfile.TemporaryDirectory() as d:
    self.runcli(d,'init')
-   a=self.runcli(d,'add','A').stdout.strip()
-   b=self.runcli(d,'add','B').stdout.strip()
-   c=self.runcli(d,'add','C').stdout.strip()
+   a=self.runcli(d,'add','Prerequisite').stdout.strip()
+   b=self.runcli(d,'add','Dependent').stdout.strip()
+   self.runcli(d,'dep','add',b,'--needs',a)
    self.runcli(d,'done',a,env={'PI_SESSION_ID':'p1'})
-   # Already DONE returns immediately
-   self.assertIn('Done: '+a,self.runcli(d,'wait',a,'--timeout','1').stdout)
-   # Wait for multiple tasks concurrently
-   def finish_b():
-    time.sleep(0.15)
-    self.runcli(d,'done',b,env={'PI_SESSION_ID':'p1'})
-   th=threading.Thread(target=finish_b);th.start()
-   out=self.runcli(d,'wait',a,b,'--timeout','3').stdout
-   th.join()
-   self.assertIn(f'Done: {a}, {b}',out)
-   # wait --ready fails fast if prerequisite becomes BLOCKED
-   d_task=self.runcli(d,'add','D').stdout.strip()
+   self.assertIn('DONE: '+a,self.runcli(d,'wait',a,'--timeout','1').stdout)
+   self.assertIn('READY: '+b,self.runcli(d,'wait',b,'--until','ready','--timeout','1').stdout)
+   c=self.runcli(d,'add','Blocked prerequisite').stdout.strip()
+   d_task=self.runcli(d,'add','Blocked dependent').stdout.strip()
    self.runcli(d,'dep','add',d_task,'--needs',c)
    self.runcli(d,'block',c,'--reason','upstream broken',env={'PI_SESSION_ID':'p1'})
-   err=self.runcli(d,'wait',d_task,'--ready','--timeout','1',ok=False).stderr
+   err=self.runcli(d,'wait',d_task,'--until','ready','--timeout','1',ok=False).stderr
    self.assertIn('upstream broken',err)
+
  def test_search_or_phrases_limit_and_auto_sync_disable(self):
   with tempfile.TemporaryDirectory() as d:
    self.runcli(d,'init')
@@ -272,9 +267,88 @@ class TaskTest(unittest.TestCase):
    self.assertIn('more matches',lim_out)
    all_out=self.runcli(d,'search','oauth','--tasks-only','--limit','0').stdout
    self.assertNotIn('more matches',all_out);self.assertIn(a,all_out);self.assertIn(d2,all_out)
+ def test_multiple_boards_and_default_board(self):
+  with tempfile.TemporaryDirectory() as d:
+   self.runcli(d,'init')
+   default_task=self.runcli(d,'add','Default task').stdout.strip()
+   self.runcli(d,'board','create','frontend')
+   front_task=self.runcli(d,'--board','frontend','add','Frontend task').stdout.strip()
+   self.assertIn(default_task,self.runcli(d,'list').stdout)
+   self.assertNotIn(front_task,self.runcli(d,'list').stdout)
+   self.assertIn(front_task,self.runcli(d,'--board','frontend','list').stdout)
+   self.assertIn('## Shared Task Board: frontend',(Path(d)/'AGENTS.md').read_text())
+   self.runcli(d,'--board','frontend','dep','add',front_task,'--needs',default_task,ok=False)
+   self.runcli(d,'board','use','frontend')
+   self.assertIn(front_task,self.runcli(d,'list').stdout)
+   self.assertIn(default_task,self.runcli(d,'--board','default','list').stdout)
+   self.assertIn('frontend',self.runcli(d,'board','list').stdout)
+   self.runcli(d,'board','delete','frontend',ok=False)
+   self.runcli(d,'board','use','default')
+   self.runcli(d,'board','delete','frontend','--force')
+   self.runcli(d,'board','list')
+ def test_watch_event_and_cursor(self):
+  with tempfile.TemporaryDirectory() as d:
+   self.runcli(d,'init')
+   self.runcli(d,'watch','unexpected-task-id',ok=False)
+   tid=self.runcli(d,'add','Watch target').stdout.strip()
+   def add_note():
+    time.sleep(0.2)
+    self.runcli(d,'note',tid,'new event',env={'PI_SESSION_ID':'watcher'})
+   th=threading.Thread(target=add_note);th.start()
+   result=json.loads(self.runcli(d,'watch','--event','task.noted','--timeout','3','--json').stdout)
+   th.join()
+   self.assertEqual(result['event']['type'],'task_noted')
+   self.assertEqual(result['event']['task'],tid)
+   cursor=result['cursor']
+   self.assertGreater(cursor,0)
+   # A cursor points just after the matched event and can resume without replaying it.
+   def add_task():
+    time.sleep(0.2)
+    self.runcli(d,'add','Next event')
+   th=threading.Thread(target=add_task);th.start()
+   board_event=json.loads(self.runcli(d,'watch','--event','task.created','--since',str(cursor),'--timeout','3','--json').stdout)
+   th.join()
+   self.assertEqual(board_event['event']['type'],'task_created')
+   self.assertIn('DONE:',self.runcli(d,'done',tid,'--harness','pi','--sid','watcher').stdout.replace('Completed','DONE:'))
+ def test_assignment_self_add_doing_handoff_and_reassignment(self):
+  with tempfile.TemporaryDirectory() as d:
+   self.runcli(d,'init')
+   a=self.runcli(d,'add','Assigned at creation','--claim',env={'OPENCODE_SESSION_ID':'worker-a'}).stdout.strip()
+   self.assertIn('Assignee: opencode:worker-a',self.runcli(d,'show',a).stdout)
+   self.runcli(d,'doing',a,env={'OPENCODE_SESSION_ID':'worker-a'})
+   self.runcli(d,'note',a,'progress',env={'OPENCODE_SESSION_ID':'worker-b'},ok=False)
+   self.runcli(d,'done',a,env={'OPENCODE_SESSION_ID':'worker-b'},ok=False)
+   self.runcli(d,'assign',a,'--to','worker-b','--to-harness','opencode','--force',env={'OPENCODE_SESSION_ID':'coordinator'})
+   self.runcli(d,'done',a,env={'OPENCODE_SESSION_ID':'worker-a'},ok=False)
+   self.runcli(d,'doing',a,env={'OPENCODE_SESSION_ID':'worker-b'})
+   self.runcli(d,'done',a,env={'OPENCODE_SESSION_ID':'worker-b'})
+   self.assertIn('Assignee: opencode:worker-b',self.runcli(d,'show',a).stdout)
+   self.assertIn('task_assigned',(Path(d)/'.taskboard'/'events.jsonl').read_text())
+ def test_assignment_is_atomic_for_competing_workers(self):
+  with tempfile.TemporaryDirectory() as d:
+   self.runcli(d,'init'); tid=self.runcli(d,'add','Race').stdout.strip()
+   results=[]
+   def assign(sid):
+    env=os.environ.copy()
+    for key in HARNESS_VARS: env.pop(key,None)
+    env['PI_SESSION_ID']=sid
+    results.append(subprocess.run([sys.executable,str(CLI),'assign',tid,'--claim'],cwd=d,env=env,text=True,capture_output=True))
+   a=threading.Thread(target=assign,args=('worker-a',)); b=threading.Thread(target=assign,args=('worker-b',))
+   a.start(); b.start(); a.join(); b.join()
+   self.assertEqual(sum(x.returncode==0 for x in results),1)
+   self.assertEqual(sum(x.returncode!=0 for x in results),1)
+   shown=self.runcli(d,'show',tid).stdout
+   self.assertTrue('pi:worker-a' in shown or 'pi:worker-b' in shown)
+ def test_unassign_releases_in_progress_task(self):
+  with tempfile.TemporaryDirectory() as d:
+   self.runcli(d,'init'); tid=self.runcli(d,'add','Release').stdout.strip()
+   self.runcli(d,'doing',tid,env={'PI_SESSION_ID':'worker-a'})
+   self.runcli(d,'unassign',tid,'--force',env={'PI_SESSION_ID':'coordinator'})
+   shown=self.runcli(d,'show',tid).stdout
+   self.assertIn('READY',shown); self.assertIn('Assignee: unassigned',shown)
  def test_version_and_no_lifecycle_commands(self):
   with tempfile.TemporaryDirectory() as d:
-   self.assertIn('0.1.0',self.runcli(d,'--version').stdout)
+   self.assertIn('0.1.3',self.runcli(d,'--version').stdout)
    self.runcli(d,'init')
    for cmd in ('start','stop','start-session','conclude-session'):
     self.runcli(d,cmd,ok=False)

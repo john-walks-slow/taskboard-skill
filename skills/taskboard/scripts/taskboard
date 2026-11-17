@@ -3,7 +3,8 @@
 import argparse, collections, contextlib, datetime as dt, difflib, json, math, os, re, shlex, sys, tempfile, time
 from pathlib import Path
 
-VERSION = '0.1.0'
+VERSION = '0.1.3'
+BOARD = 'default'
 START, END = '<!-- TASKBOARD:START -->', '<!-- TASKBOARD:END -->'
 DEFAULT_ENV = {
     'codex': ['CODEX_THREAD_ID'],
@@ -48,8 +49,48 @@ def find_root():
     for x in (p, *p.parents):
         if (x/'.taskboard').is_dir(): return x
     raise RuntimeError('No .taskboard project. Run `taskboard init` in the project root.')
-def P(root):
-    d=root/'.taskboard'; return {'dir':d,'tasks':d/'tasks','events':d/'events.jsonl','config':d/'config.json'}
+def P(root, board=None):
+    board = BOARD if board is None else board
+    d = root/'.taskboard' if board == 'default' else root/'.taskboard'/'boards'/board
+    return {'dir':d,'tasks':d/'tasks','events':d/'events.jsonl','config':d/'config.json'}
+
+def valid_board(name):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', name) or name in ('.', '..'):
+        raise ValueError('invalid board name; use 1-64 letters, digits, _ or -')
+    return name
+
+def board_names(root):
+    base = root/'.taskboard'/'boards'
+    return ['default'] + sorted(p.name for p in base.iterdir() if p.is_dir() and not p.is_symlink()) if base.exists() else ['default']
+
+def board_create(root, name):
+    valid_board(name)
+    if name == 'default': raise RuntimeError("'default' board already exists")
+    p = P(root, name)
+    if p['dir'].exists(): raise RuntimeError('board already exists: '+name)
+    p['tasks'].mkdir(parents=True)
+    atomic(p['events'], '')
+    print('Created board '+name)
+
+def board_delete(root, name, force=False):
+    valid_board(name)
+    if name == 'default': raise RuntimeError("cannot delete the default board")
+    p = P(root, name)
+    if not p['dir'].is_dir() or p['dir'].is_symlink(): raise RuntimeError('unknown board '+name)
+    if cfg(root).get('default_board','default') == name:
+        raise RuntimeError('cannot delete the current default board; run taskboard board use default first')
+    if any(p['tasks'].glob('*.md')) and not force:
+        raise RuntimeError('board is not empty; pass --force to delete it')
+    import shutil
+    shutil.rmtree(p['dir'])
+    print('Deleted board '+name)
+
+def board_use(root, name):
+    valid_board(name)
+    if name not in board_names(root): raise RuntimeError('unknown board '+name)
+    path = P(root)['config']; c = json.loads(path.read_text(encoding='utf-8'))
+    c['default_board'] = name; atomic(path, json.dumps(c, indent=2)+'\n')
+    print('Default board: '+name)
 @contextlib.contextmanager
 def lock(d):
     f=open(d/'.lock','a+b')
@@ -89,8 +130,11 @@ def cfg(root=None):
     c={'version':1,'context_file':['AGENTS.md'],'auto_sync':True,'harness_env':dict(DEFAULT_ENV),'max_context_tasks':30,'max_recent_events':8}
     if GLOBAL_CFG.exists():
         c=merge_cfg(c,json.loads(GLOBAL_CFG.read_text(encoding='utf-8')))
-    if root is not None and P(root)['config'].exists():
-        c=merge_cfg(c,json.loads(P(root)['config'].read_text(encoding='utf-8')))
+    if root is not None:
+        project_cfg=root/'.taskboard'/'config.json'
+        if project_cfg.exists(): c=merge_cfg(c,json.loads(project_cfg.read_text(encoding='utf-8')))
+        if BOARD!='default' and P(root)['config'].exists():
+            c=merge_cfg(c,json.loads(P(root)['config'].read_text(encoding='utf-8')))
     return c
 def events(root):
     p=P(root)['events']
@@ -143,15 +187,21 @@ def detect(root,harness=None,sid=None):
     return found[0]
 def actor(root,harness=None,sid=None):
     h,s=detect(root,harness,sid); return {'harness':h,'sid':s}
+def assignee_label(t):
+    a=t.get('assignee')
+    return f" [{a.get('harness','')}:{a.get('sid','')}]" if a else ''
 def status(t,ts):
     if t.get('state')=='done': return 'DONE'
     if t.get('state')=='blocked': return 'BLOCKED'
     if t.get('state')=='doing': return 'IN_PROGRESS'
     if any(d in ts and ts[d].get('state')!='done' for d in t.get('depends_on',[])): return 'WAITING'
     return 'READY'
-def add_task(root,title,desc=None):
-    tid='t-'+os.urandom(4).hex(); t={'id':tid,'title':title,'state':'open','depends_on':[],'participants':[],'blocked_reason':'','created_at':now(),'updated_at':now(),'_body':desc.strip() if desc else ''}
-    save_task(root,t); kw={'desc':desc.strip()} if desc else {}; log(root,'task_created',task=tid,title=title,**kw); return t
+def add_task(root,title,desc=None,assignee=None):
+    if assignee and (not assignee.get('harness') or not assignee.get('sid')): raise ValueError('assignee requires non-empty Harness and Session ID')
+    tid='t-'+os.urandom(4).hex(); t={'id':tid,'title':title,'state':'open','depends_on':[],'participants':[],'assignee':assignee,'blocked_reason':'','created_at':now(),'updated_at':now(),'_body':desc.strip() if desc else ''}
+    save_task(root,t); kw={'desc':desc.strip()} if desc else {}; log(root,'task_created',task=tid,title=title,**kw)
+    if assignee: log(root,'task_assigned',task=tid,assignee=assignee)
+    return t
 def dep_add(root,tid,need):
     ts=read_tasks(root)
     if tid not in ts or need not in ts: raise RuntimeError('both task IDs must exist')
@@ -162,40 +212,105 @@ def dep_add(root,tid,need):
         seen.add(a); return any(reaches(n,b,seen) for n in graph.get(a,[]))
     if reaches(need,tid,set()): raise RuntimeError('dependency would create a cycle')
     ts[tid]['depends_on']=graph[tid]; ts[tid]['updated_at']=now(); save_task(root,ts[tid]); log(root,'dependency_added',task=tid,needs=need)
-def wait_tasks(root,tids,ready=False,timeout=None):
-    if timeout is not None and timeout<0: raise ValueError('--timeout must be >= 0')
+def event_offset(root):
+    path=P(root)['events']
+    return path.stat().st_size if path.exists() else 0
+
+def read_events_after(root, offset):
+    path=P(root)['events']
+    if not path.exists(): return [], offset
+    with path.open('rb') as f:
+        f.seek(offset); data=f.read()
+    cut=data.rfind(b'\n')
+    if cut < 0: return [], offset
+    complete=data[:cut+1]; out=[]; position=offset
+    for line in complete.splitlines(keepends=True):
+        position += len(line)
+        try: out.append((json.loads(line.decode('utf-8')), position))
+        except (ValueError, UnicodeDecodeError): continue
+    return out, position
+
+def wait_task(root, tid, until='done', timeout=None, as_json=False):
+    if timeout is not None and timeout < 0: raise ValueError('--timeout must be >= 0')
+    aliases={'done':'DONE','doing':'IN_PROGRESS','in_progress':'IN_PROGRESS','ready':'READY','blocked':'BLOCKED','waiting':'WAITING'}
+    if until.lower() not in aliases: raise ValueError('--until must be done, doing, ready, waiting, or blocked')
+    target=aliases[until.lower()]
     deadline=None if timeout is None else time.monotonic()+timeout
     while True:
         with lock(P(root)['dir']):
             ts=read_tasks(root)
-            pending=[]
-            for tid in tids:
-                if tid not in ts: raise RuntimeError('unknown task '+tid)
-                t=ts[tid]; st=status(t,ts)
-                if st=='BLOCKED':
-                    reason=t.get('blocked_reason','')
-                    raise RuntimeError(f'task {tid} is blocked'+(': '+reason if reason else ''))
-                if ready:
-                    for d in t.get('depends_on',[]):
-                        if d in ts and ts[d].get('state')=='blocked':
-                            reason=ts[d].get('blocked_reason','')
-                            raise RuntimeError(f'prerequisite {d} is blocked'+(': '+reason if reason else ''))
-                    if st=='WAITING': pending.append(tid)
-                else:
-                    if st!='DONE': pending.append(tid)
-        if not pending:
-            label='Ready' if ready else 'Done'
-            print(f"{label}: {', '.join(tids)}")
-            return
+            if tid not in ts: raise RuntimeError('unknown task '+tid)
+            t=ts[tid]; current=status(t,ts)
+            if current==target:
+                result={'kind':'condition','board':BOARD,'until':target,'matched':[tid],'task':tid}
+                print(json.dumps(result,ensure_ascii=False) if as_json else f'{target}: {tid}')
+                return
+            reason=''
+            if current=='BLOCKED' and target!='BLOCKED':
+                reason='is blocked'+(': '+t.get('blocked_reason','') if t.get('blocked_reason') else '')
+            else:
+                for dep in t.get('depends_on',[]):
+                    if dep in ts and status(ts[dep],ts)=='BLOCKED':
+                        reason=f'has blocked prerequisite {dep}'+(': '+ts[dep].get('blocked_reason','') if ts[dep].get('blocked_reason') else '')
+                        break
+            if reason: raise RuntimeError(f'task {tid} {reason}')
         if deadline is not None:
-            rem=deadline-time.monotonic()
-            if rem<=0: raise RuntimeError('timed out waiting for '+', '.join(pending))
-            time.sleep(min(1.0,rem))
-        else:
-            time.sleep(1.0)
+            remaining=deadline-time.monotonic()
+            if remaining<=0: raise RuntimeError('timed out waiting for '+tid)
+            time.sleep(min(0.25,remaining))
+        else: time.sleep(0.25)
+
+def watch(root, event_type=None, timeout=None, since=None, as_json=False):
+    if timeout is not None and timeout < 0: raise ValueError('--timeout must be >= 0')
+    with lock(P(root)['dir']): current_offset=event_offset(root)
+    cursor=current_offset if since is None else since
+    if cursor < 0 or cursor > current_offset: raise ValueError('--since must be a valid event cursor from this board')
+    deadline=None if timeout is None else time.monotonic()+timeout
+    while True:
+        with lock(P(root)['dir']):
+            new_events,cursor=read_events_after(root,cursor)
+            for event,event_cursor in new_events:
+                if event_type and event.get('type') != event_type.replace('.', '_'): continue
+                result={'kind':'event','board':BOARD,'event':event,'cursor':event_cursor}
+                print(json.dumps(result,ensure_ascii=False) if as_json else json.dumps(event,ensure_ascii=False))
+                return
+        if deadline is not None:
+            remaining=deadline-time.monotonic()
+            if remaining<=0: raise RuntimeError('timed out waiting for board event')
+            time.sleep(min(0.25,remaining))
+        else: time.sleep(0.25)
+
 def add_participant(t,a):
     ref={'harness':a['harness'],'sid':a['sid']}
     if ref not in t['participants']: t['participants'].append(ref)
+def same_actor(left,right):
+    return bool(left and right and left.get('harness')==right.get('harness') and left.get('sid')==right.get('sid'))
+def assign_task(root,tid,target,by=None,force=False):
+    ts=read_tasks(root)
+    if tid not in ts: raise RuntimeError('unknown task '+tid)
+    t=ts[tid]; current=t.get('assignee')
+    if not target.get('harness') or not target.get('sid'): raise ValueError('assignee requires non-empty Harness and Session ID')
+    if same_actor(current,target): return False
+    if current and not force:
+        raise RuntimeError('task '+tid+' is assigned to '+current.get('harness','?')+':'+current.get('sid','?')+'; use --force to reassign')
+    if t.get('state')=='done': raise RuntimeError('cannot assign a DONE task')
+    t['assignee']=target; t['updated_at']=now(); save_task(root,t)
+    log(root,'task_assigned',task=tid,assignee=target,**({'assigned_by':by} if by else {}))
+    return True
+def unassign_task(root,tid,by=None,force=False):
+    ts=read_tasks(root)
+    if tid not in ts: raise RuntimeError('unknown task '+tid)
+    t=ts[tid]; current=t.get('assignee')
+    if not current: raise RuntimeError('task '+tid+' is not assigned')
+    if by and not same_actor(current,by) and not force: raise RuntimeError('only the current assignee can unassign this task; use --force as Coordinator')
+    t['assignee']=None
+    if t.get('state')=='doing': t['state']='open'
+    t['updated_at']=now(); save_task(root,t)
+    log(root,'task_unassigned',task=tid,previous_assignee=current,**({'unassigned_by':by} if by else {}))
+def require_assignee(t,a,operation):
+    current=t.get('assignee')
+    if current and not same_actor(current,a):
+        raise RuntimeError(f"cannot {operation} task assigned to {current.get('harness','?')}:{current.get('sid','?')}")
 def doing(root,tid,a):
     ts=read_tasks(root)
     if tid not in ts: raise RuntimeError('unknown task '+tid)
@@ -204,8 +319,14 @@ def doing(root,tid,a):
     st=status(t,ts)
     if st=='WAITING': raise RuntimeError('task is waiting for '+', '.join(d for d in t.get('depends_on',[]) if d in ts and ts[d].get('state')!='done'))
     if st=='BLOCKED': raise RuntimeError('task is blocked; run taskboard unblock first')
+    current=t.get('assignee')
+    if current and not same_actor(current,a):
+        raise RuntimeError('task is assigned to '+current.get('harness','?')+':'+current.get('sid','?'))
+    assigned_now=not current
+    if assigned_now: t['assignee']=a
     t['state']='doing'; add_participant(t,a); t['updated_at']=now(); save_task(root,t)
-    log(root,'task_claimed',task=tid,**a)
+    if assigned_now: log(root,'task_assigned',task=tid,assignee=a,assignment_reason='started_by_self')
+    log(root,'task_started',task=tid,**a)
 def append_note(t,text,a):
     line=f"- [{now()}] {a['harness']}:{a['sid']}: {text.strip()}"
     body=t.get('_body','').strip()
@@ -213,20 +334,28 @@ def append_note(t,text,a):
 def note_task(root,tid,text,a):
     ts=read_tasks(root)
     if tid not in ts: raise RuntimeError('unknown task '+tid)
-    t=ts[tid]; append_note(t,text,a); add_participant(t,a); t['updated_at']=now()
+    t=ts[tid]; require_assignee(t,a,'add a note to'); append_note(t,text,a); add_participant(t,a); t['updated_at']=now()
     save_task(root,t); log(root,'task_noted',task=tid,note=text.strip(),**a)
 def done(root,tid,a,note_text=None):
     ts=read_tasks(root)
     if tid not in ts: raise RuntimeError('unknown task '+tid)
-    t=ts[tid]; t['state']='done'; t['blocked_reason']=''
+    t=ts[tid]; require_assignee(t,a,'complete'); assigned_now=not t.get('assignee')
+    if assigned_now: t['assignee']=a
+    t['state']='done'; t['blocked_reason']=''
     if note_text: append_note(t,note_text,a)
     add_participant(t,a); t['updated_at']=now()
-    save_task(root,t); kw={'note':note_text.strip()} if note_text else {}; log(root,'task_done',task=tid,**kw,**a)
+    save_task(root,t)
+    if assigned_now: log(root,'task_assigned',task=tid,assignee=a,assignment_reason='completed_by_self')
+    kw={'note':note_text.strip()} if note_text else {}; log(root,'task_done',task=tid,**kw,**a)
 def block(root,tid,reason,a):
     ts=read_tasks(root)
     if tid not in ts: raise RuntimeError('unknown task '+tid)
-    t=ts[tid]; t['state']='blocked'; t['blocked_reason']=reason; add_participant(t,a); t['updated_at']=now()
-    save_task(root,t); log(root,'task_blocked',task=tid,reason=reason,**a)
+    t=ts[tid]; require_assignee(t,a,'block'); assigned_now=not t.get('assignee')
+    if assigned_now: t['assignee']=a
+    t['state']='blocked'; t['blocked_reason']=reason; add_participant(t,a); t['updated_at']=now()
+    save_task(root,t)
+    if assigned_now: log(root,'task_assigned',task=tid,assignee=a,assignment_reason='blocked_by_self')
+    log(root,'task_blocked',task=tid,reason=reason,**a)
 
 TASK_WEIGHTS={'id':4.0,'title':3.0,'blocked':2.2,'body':1.5,'meta':1.0}
 EVENT_WEIGHTS={'task':2.5,'text':2.5,'type':1.5,'actor':1.2}
@@ -288,8 +417,10 @@ def parse_query(raw_parts,filters):
 def doc_from_task(t,ts):
     st=status(t,ts)
     parts=[f"{x.get('harness','')}:{x.get('sid','')}" for x in t.get('participants',[])]
-    fields={'id':t['id'],'title':t.get('title',''),'blocked':t.get('blocked_reason',''),'body':t.get('_body',''),'meta':' '.join(t.get('depends_on',[])+parts+[st])}
-    return {'kind':'task','id':t['id'],'status':st,'ts':t.get('updated_at',t.get('created_at','')),'task':t,'fields':fields,'weights':TASK_WEIGHTS,'harnesses':{x.get('harness','') for x in t.get('participants',[])},'sids':{x.get('sid','') for x in t.get('participants',[])}}
+    assignee=t.get('assignee') or {}
+    assigned_ref=f"{assignee.get('harness','')}:{assignee.get('sid','')}" if assignee else ''
+    fields={'id':t['id'],'title':t.get('title',''),'blocked':t.get('blocked_reason',''),'body':t.get('_body',''),'meta':' '.join(t.get('depends_on',[])+parts+[assigned_ref,st])}
+    return {'kind':'task','id':t['id'],'status':st,'ts':t.get('updated_at',t.get('created_at','')),'task':t,'fields':fields,'weights':TASK_WEIGHTS,'harnesses':{x.get('harness','') for x in t.get('participants',[])}|({assignee.get('harness','')} if assignee else set()),'sids':{x.get('sid','') for x in t.get('participants',[])}|({assignee.get('sid','')} if assignee else set())}
 
 def doc_from_event(e):
     actor_vals=[e.get('harness',''),e.get('sid',''),e.get('from_harness',''),e.get('from_sid',''),e.get('to_harness',''),e.get('to_sid','')]
@@ -429,20 +560,23 @@ def sync(root,dry=False,quiet=False):
         if not quiet:print('No context_file configured.')
         return
     ts=read_tasks(root); limit=int(c.get('max_context_tasks',30))
-    lines=[START,'## Shared Task Board','','> **Mandatory:** ALWAYS load and follow the `taskboard` skill before starting any work in this repository.']
+    board_heading='## Shared Task Board' if BOARD=='default' else f'## Shared Task Board: {BOARD}'
+    lines=[START,board_heading,'','> **Mandatory:** ALWAYS load and follow the `taskboard` skill before starting any work in this repository.']
     for heading,st in [('In Progress','IN_PROGRESS'),('Ready Tasks','READY'),('Waiting','WAITING'),('Blocked','BLOCKED')]:
         lines.extend(['',f'### {heading}']); group=[t for t in ts.values() if status(t,ts)==st]
         for t in sorted(group,key=lambda x:x.get('created_at',''))[:limit]:
             extra=''
             if st=='WAITING':extra=' (waiting for '+', '.join(d for d in t.get('depends_on',[]) if d in ts and ts[d].get('state')!='done')+')'
             if st=='BLOCKED' and t.get('blocked_reason'):extra=': '+t['blocked_reason']
-            lines.append(f"- `{t['id']}` {t['title']}{extra}")
+            lines.append(f"- `{t['id']}` {t['title']}{extra}{assignee_label(t)}")
         if not group:lines.append('- None')
-    recent=[e for e in events(root) if e.get('type') in ('task_handoff','task_done','task_claimed')][-int(c.get('max_recent_events',8)):]
+    recent=[e for e in events(root) if e.get('type') in ('task_handoff','task_assigned','task_unassigned','task_done','task_started','task_claimed')][-int(c.get('max_recent_events',8)):]
     lines.extend(['','### Recent Activity'])
     for e in reversed(recent):
         if e['type']=='task_handoff': msg=f"`{e['task']}` handed off: `{e.get('from_sid','?')}` → `{e.get('to_sid','?')}`"
-        else: msg=f"`{e['task']}` {('completed' if e['type']=='task_done' else 'claimed')} by `{e.get('sid','')}`"
+        elif e['type']=='task_assigned': msg=f"`{e['task']}` assigned to `{e.get('assignee',{}).get('harness','')}:{e.get('assignee',{}).get('sid','')}`"
+        elif e['type']=='task_unassigned': msg=f"`{e['task']}` unassigned"
+        else: msg=f"`{e['task']}` {('completed' if e['type']=='task_done' else 'started')} by `{e.get('sid','')}`"
         lines.append('- '+msg)
     lines.append(END); generated='\n'.join(lines); updated=0
     for rel in targets:
@@ -461,7 +595,7 @@ def sync(root,dry=False,quiet=False):
             if not quiet:print('Updated '+str(target.relative_to(root)))
     if not dry and not updated and not quiet:print('Context is already up to date.')
 def main():
-    ap=argparse.ArgumentParser(prog='taskboard'); ap.add_argument('--version',action='version',version=VERSION); sp=ap.add_subparsers(dest='cmd',required=True)
+    ap=argparse.ArgumentParser(prog='taskboard'); ap.add_argument('--version',action='version',version=VERSION); ap.add_argument('--board',help='select a board (default: project default_board)'); sp=ap.add_subparsers(dest='cmd',required=True)
     p=sp.add_parser('init');p.add_argument('--context-file',nargs='+',default=None)
     for cmd in ('doing','done','block','handoff','note'):
         p=sp.add_parser(cmd);p.add_argument('task_id');p.add_argument('--harness');p.add_argument('--sid')
@@ -469,15 +603,23 @@ def main():
         if cmd=='handoff':p.add_argument('--to',required=True);p.add_argument('--to-harness');p.add_argument('--note')
         if cmd=='done':p.add_argument('--note')
         if cmd=='note':p.add_argument('message')
-    p=sp.add_parser('add');p.add_argument('title');p.add_argument('-d','--desc','--description',dest='desc')
+    p=sp.add_parser('add');p.add_argument('title');p.add_argument('-d','--desc','--description',dest='desc');g=p.add_mutually_exclusive_group();g.add_argument('--claim',dest='claim_self',action='store_true');g.add_argument('--to',dest='assign_to');p.add_argument('--to-harness')
+    p=sp.add_parser('assign');p.add_argument('task_id');g=p.add_mutually_exclusive_group(required=True);g.add_argument('--claim',dest='claim_self',action='store_true');g.add_argument('--to',dest='assign_to');p.add_argument('--harness');p.add_argument('--sid');p.add_argument('--to-harness');p.add_argument('--force',action='store_true')
+    p=sp.add_parser('unassign');p.add_argument('task_id');p.add_argument('--harness');p.add_argument('--sid');p.add_argument('--force',action='store_true')
     p=sp.add_parser('list');p.add_argument('--all',action='store_true')
     p=sp.add_parser('show');p.add_argument('task_id')
     p=sp.add_parser('unblock');p.add_argument('task_id')
     p=sp.add_parser('dep');sub=p.add_subparsers(dest='dep_cmd',required=True)
     q=sub.add_parser('add');q.add_argument('task_id');q.add_argument('--needs',required=True)
     q.add_argument('--wait',action='store_true');q.add_argument('--timeout',type=float)
-    p=sp.add_parser('wait');p.add_argument('task_ids',nargs='+');p.add_argument('--ready',action='store_true')
-    p.add_argument('--timeout',type=float)
+    p=sp.add_parser('wait');p.add_argument('task_id');p.add_argument('--until',choices=['done','doing','ready','waiting','blocked'],default='done');p.add_argument('--timeout',type=float);p.add_argument('--json',action='store_true')
+    p=sp.add_parser('watch');p.add_argument('--event');p.add_argument('--timeout',type=float);p.add_argument('--since',type=int);p.add_argument('--json',action='store_true')
+    p=sp.add_parser('board');bs=p.add_subparsers(dest='board_cmd',required=True)
+    bs.add_parser('list')
+    q=bs.add_parser('create');q.add_argument('name')
+    q=bs.add_parser('delete');q.add_argument('name');q.add_argument('--force',action='store_true')
+    q=bs.add_parser('use');q.add_argument('name')
+    q=bs.add_parser('show');q.add_argument('name')
     p=sp.add_parser('status')
     p=sp.add_parser('search');p.add_argument('query',nargs='*');p.add_argument('--status',action='append');p.add_argument('--harness');p.add_argument('--sid')
     p.add_argument('--tasks-only',action='store_true');p.add_argument('--events-only',action='store_true');p.add_argument('--since')
@@ -492,36 +634,69 @@ def main():
     try:
         if a.cmd=='init':init(a.context_file);return 0
         root=find_root()
+        global BOARD
+        if a.cmd=='board':
+            if a.board_cmd=='list':
+                default=cfg(root).get('default_board','default')
+                for name in board_names(root): print(('* ' if name==default else '  ')+name)
+            elif a.board_cmd=='create': board_create(root,a.name)
+            elif a.board_cmd=='delete': board_delete(root,a.name,a.force)
+            elif a.board_cmd=='use': board_use(root,a.name)
+            elif a.board_cmd=='show':
+                if a.name not in board_names(root): raise RuntimeError('unknown board '+a.name)
+                old=BOARD; BOARD=a.name; ts=read_tasks(root); counts=collections.Counter(status(t,ts) for t in ts.values()); BOARD=old
+                print(a.name)
+                for st in ('IN_PROGRESS','READY','WAITING','BLOCKED','DONE'): print(f'{st}: {counts.get(st,0)}')
+            return 0
+        BOARD=valid_board(a.board or cfg(root).get('default_board','default'))
+        if BOARD not in board_names(root): raise RuntimeError('unknown board '+BOARD+'; create it with taskboard board create')
+        if a.cmd=='watch':
+            watch(root,a.event,a.timeout,a.since,a.json)
+            return 0
         if a.cmd=='wait':
-            wait_tasks(root,a.task_ids,ready=a.ready,timeout=a.timeout)
+            wait_task(root,a.task_id,a.until,a.timeout,a.json)
             return 0
         with lock(P(root)['dir']):
-            if a.cmd=='add':t=add_task(root,a.title,a.desc);print(t['id'])
+            if a.cmd=='add':
+                target=actor(root) if a.claim_self else ({'harness':a.to_harness,'sid':a.assign_to} if a.assign_to and a.to_harness else None)
+                if a.assign_to and not a.to_harness: raise RuntimeError('--to requires --to-harness so the assignee identity is unambiguous')
+                t=add_task(root,a.title,a.desc,target);print(t['id'])
             elif a.cmd in ('list','show'):
                 ts=read_tasks(root); selected=[ts[a.task_id]] if a.cmd=='show' and a.task_id in ts else list(ts.values())
                 if a.cmd=='show' and a.task_id not in ts:raise RuntimeError('unknown task')
                 for t in sorted(selected,key=lambda x:x['created_at']):
                     st=status(t,ts)
                     if a.cmd=='list' and not a.all and st=='DONE':continue
-                    print(f"{t['id']}  {st:<11} {t['title']}")
+                    print(f"{t['id']}  {st:<11} {t['title']}{assignee_label(t)}")
                     if a.cmd=='show':
                         print('Depends on: '+(', '.join(t.get('depends_on',[])) or 'none'))
+                        assignee=t.get('assignee'); print('Assignee: '+(assignee.get('harness','')+':'+assignee.get('sid','') if assignee else 'unassigned'))
                         print('Participants: '+(', '.join(x['harness']+':'+x['sid'] for x in t.get('participants',[])) or 'none'))
                         if t.get('blocked_reason'):print('Blocked: '+t['blocked_reason'])
                         if t.get('_body'):print('Notes:\n'+t['_body'])
-            elif a.cmd in ('doing','done','block','handoff','note'):
+            elif a.cmd in ('doing','done','block','handoff','note','assign','unassign'):
                 who=actor(root,a.harness,a.sid); ts=read_tasks(root)
-                if a.cmd=='doing':doing(root,a.task_id,who);print('Now doing '+a.task_id)
+                if a.cmd=='assign':
+                    target=who if a.claim_self else ({'harness':a.to_harness,'sid':a.assign_to} if a.assign_to and a.to_harness else None)
+                    if target is None: raise RuntimeError('--to requires --to-harness so the assignee identity is unambiguous')
+                    changed=assign_task(root,a.task_id,target,by=who,force=a.force)
+                    print(('Assigned ' if changed else 'Already assigned ')+a.task_id+' to '+target['harness']+':'+target['sid'])
+                elif a.cmd=='unassign':unassign_task(root,a.task_id,by=who,force=a.force);print('Unassigned '+a.task_id)
+                elif a.cmd=='doing':doing(root,a.task_id,who);print('Now doing '+a.task_id)
                 elif a.cmd=='done':done(root,a.task_id,who,a.note);print('Completed '+a.task_id)
                 elif a.cmd=='block':block(root,a.task_id,a.reason,who);print('Blocked '+a.task_id)
                 elif a.cmd=='note':note_task(root,a.task_id,a.message,who);print('Noted '+a.task_id)
                 else:
                     if a.task_id not in ts:raise RuntimeError('unknown task')
-                    t=ts[a.task_id]
+                    t=ts[a.task_id]; target={'harness':a.to_harness or who['harness'],'sid':a.to}
+                    if not target['harness'] or not target['sid']: raise RuntimeError('handoff target requires non-empty Harness and Session ID')
+                    if t.get('state')=='done': raise RuntimeError('cannot hand off a DONE task')
+                    if not t.get('assignee'): raise RuntimeError('task has no assignee; use assign --to instead')
+                    require_assignee(t,who,'hand off')
                     if a.note: append_note(t,a.note,who)
-                    add_participant(t,who); t['state']='open'; t['updated_at']=now(); save_task(root,t)
+                    add_participant(t,who); t['assignee']=target; t['state']='open'; t['updated_at']=now(); save_task(root,t)
                     kw={'note':a.note.strip()} if a.note else {}
-                    log(root,'task_handoff',task=a.task_id,from_harness=who['harness'],from_sid=who['sid'],to_harness=a.to_harness or who['harness'],to_sid=a.to,**kw)
+                    log(root,'task_handoff',task=a.task_id,from_harness=who['harness'],from_sid=who['sid'],to_harness=target['harness'],to_sid=a.to,**kw)
                     print(f'Handed off {a.task_id} to {a.to}')
             elif a.cmd=='unblock':
                 ts=read_tasks(root)
@@ -535,12 +710,12 @@ def main():
                     group=[t for t in ts.values() if status(t,ts)==st]
                     if group:
                         print(st)
-                        for t in group:print(f"- {t['id']} {t['title']}")
+                        for t in group:print(f"- {t['id']} {t['title']}{assignee_label(t)}")
             elif a.cmd=='search':search_cmd(root,a)
             elif a.cmd in ('sync','context'):sync(root,getattr(a,'dry_run',False) or a.cmd=='context')
-            if a.cmd in ('add','doing','done','block','handoff','note','unblock','dep'):auto_sync(root)
+            if a.cmd in ('add','assign','unassign','doing','done','block','handoff','note','unblock','dep'):auto_sync(root)
         if a.cmd=='dep' and a.wait:
-            wait_tasks(root,[a.needs],timeout=a.timeout)
+            wait_task(root,a.needs,until='done',timeout=a.timeout)
         return 0
     except (RuntimeError,ValueError,KeyError,OSError) as e:print('taskboard: error: '+str(e),file=sys.stderr);return 2
 if __name__=='__main__':raise SystemExit(main())
