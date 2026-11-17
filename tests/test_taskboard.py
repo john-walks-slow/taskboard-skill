@@ -186,6 +186,89 @@ class TaskTest(unittest.TestCase):
    self.assertIn('Need refresh token tests',shown)
    self.assertIn('All tests passing',shown)
    self.assertIn(a,self.runcli(d,'search','JWT','middleware').stdout)
+ def test_bin_wrapper_unblock_list_status_and_guardrails(self):
+  bin_cli=Path(__file__).resolve().parents[1]/'bin'/'taskboard'
+  with tempfile.TemporaryDirectory() as d:
+   e=os.environ.copy()
+   for k in HARNESS_VARS:e.pop(k,None)
+   p=subprocess.run([sys.executable,str(bin_cli),'--version'],cwd=d,env=e,text=True,capture_output=True)
+   self.assertEqual(p.returncode,0);self.assertIn('0.4.0',p.stdout)
+   self.runcli(d,'init')
+   a=self.runcli(d,'add','Task A').stdout.strip()
+   b=self.runcli(d,'add','Task B').stdout.strip()
+   self.runcli(d,'dep','add',b,'--needs',a)
+   # Ambiguous harness fails without --harness, succeeds with --harness
+   amb={'CODEX_THREAD_ID':'c1','OPENCODE_SESSION_ID':'o1'}
+   self.assertIn('Ambiguous',self.runcli(d,'doing',a,env=amb,ok=False).stderr)
+   self.runcli(d,'doing',a,env=amb,ok=False)
+   self.runcli(d,'doing',a,'--harness','opencode',env=amb)
+   # Cannot claim WAITING task
+   self.runcli(d,'doing',b,env={'PI_SESSION_ID':'p1'},ok=False)
+   # Block & unblock task B -> returns to WAITING since A is not DONE
+   self.runcli(d,'block',b,'--reason','hold',env={'PI_SESSION_ID':'p1'})
+   self.assertIn('BLOCKED',self.runcli(d,'show',b).stdout)
+   self.runcli(d,'unblock',b)
+   self.assertIn('WAITING',self.runcli(d,'show',b).stdout)
+   # Complete A -> B becomes READY; list hides DONE unless --all
+   self.runcli(d,'done',a,env={'OPENCODE_SESSION_ID':'o1'})
+   self.assertNotIn(a,self.runcli(d,'list').stdout)
+   self.assertIn(a,self.runcli(d,'list','--all').stdout)
+   self.assertIn('DONE',self.runcli(d,'status').stdout)
+   # Cannot claim DONE task
+   self.runcli(d,'doing',a,env={'OPENCODE_SESSION_ID':'o1'},ok=False)
+   # TASKBOARD_HARNESS + TASKBOARD_SID explicit override
+   self.runcli(d,'doing',b,env={'TASKBOARD_HARNESS':'custom-ci','TASKBOARD_SID':'ci-99'})
+   self.assertIn('custom-ci:ci-99',self.runcli(d,'show',b).stdout)
+   # Path traversal in context_file rejected
+   pcfg=Path(d)/'.taskboard'/'config.json'
+   c=json.loads(pcfg.read_text());c['context_file']=['../escape.md'];pcfg.write_text(json.dumps(c))
+   self.assertIn('inside project root',self.runcli(d,'sync',ok=False).stderr)
+ def test_wait_multiple_and_prereq_blocked_and_already_done(self):
+  with tempfile.TemporaryDirectory() as d:
+   self.runcli(d,'init')
+   a=self.runcli(d,'add','A').stdout.strip()
+   b=self.runcli(d,'add','B').stdout.strip()
+   c=self.runcli(d,'add','C').stdout.strip()
+   self.runcli(d,'done',a,env={'PI_SESSION_ID':'p1'})
+   # Already DONE returns immediately
+   self.assertIn('Done: '+a,self.runcli(d,'wait',a,'--timeout','1').stdout)
+   # Wait for multiple tasks concurrently
+   def finish_b():
+    time.sleep(0.15)
+    self.runcli(d,'done',b,env={'PI_SESSION_ID':'p1'})
+   th=threading.Thread(target=finish_b);th.start()
+   out=self.runcli(d,'wait',a,b,'--timeout','3').stdout
+   th.join()
+   self.assertIn(f'Done: {a}, {b}',out)
+   # wait --ready fails fast if prerequisite becomes BLOCKED
+   d_task=self.runcli(d,'add','D').stdout.strip()
+   self.runcli(d,'dep','add',d_task,'--needs',c)
+   self.runcli(d,'block',c,'--reason','upstream broken',env={'PI_SESSION_ID':'p1'})
+   err=self.runcli(d,'wait',d_task,'--ready','--timeout','1',ok=False).stderr
+   self.assertIn('upstream broken',err)
+ def test_search_or_phrases_limit_and_auto_sync_disable(self):
+  with tempfile.TemporaryDirectory() as d:
+   self.runcli(d,'init')
+   pcfg=Path(d)/'.taskboard'/'config.json'
+   c=json.loads(pcfg.read_text());c['auto_sync']=False;pcfg.write_text(json.dumps(c))
+   a=self.runcli(d,'add','Fix OAuth login flow').stdout.strip()
+   b=self.runcli(d,'add','Setup Redis cache').stdout.strip()
+   d2=self.runcli(d,'add','Login via OAuth callback').stdout.strip()
+   # auto_sync: false does not create AGENTS.md, but context/dry-run still prints preview
+   self.assertFalse((Path(d)/'AGENTS.md').exists())
+   self.assertIn('Shared Task Board',self.runcli(d,'context').stdout)
+   self.assertFalse((Path(d)/'AGENTS.md').exists())
+   # OR query
+   or_out=self.runcli(d,'search','redis','OR','flow','--tasks-only').stdout
+   self.assertIn(a,or_out);self.assertIn(b,or_out)
+   # Exact quoted phrase
+   ph_out=self.runcli(d,'search','"OAuth login"','--tasks-only').stdout
+   self.assertIn(a,ph_out);self.assertNotIn(d2,ph_out)
+   # Limit truncation & --limit 0
+   lim_out=self.runcli(d,'search','oauth','--tasks-only','--limit','1').stdout
+   self.assertIn('more matches',lim_out)
+   all_out=self.runcli(d,'search','oauth','--tasks-only','--limit','0').stdout
+   self.assertNotIn('more matches',all_out);self.assertIn(a,all_out);self.assertIn(d2,all_out)
  def test_version_and_no_lifecycle_commands(self):
   with tempfile.TemporaryDirectory() as d:
    self.assertIn('0.4.0',self.runcli(d,'--version').stdout)

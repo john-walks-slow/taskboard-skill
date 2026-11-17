@@ -278,7 +278,7 @@ def parse_query(raw_parts,filters):
                         elif x in ('event','events'): filters['kinds'].add('event')
                 elif kl in ('harness','sid','task','since','before'): filters[kl]=v
                 continue
-        item={'raw':body.lower(),'toks':tokenize(body),'phrase':' ' in body or CJK_RE.search(body) is not None and len(body)>=2}
+        item={'raw':body.lower(),'toks':tokenize(body),'phrase':' ' in body}
         if is_neg: negs.append(item)
         else: groups[-1].append(item)
     groups=[g for g in groups if g]
@@ -316,6 +316,7 @@ def term_hits_doc(item,d,fuzzy=False):
         vlow=val.lower()
         if raw and raw in vlow:
             matched_fields.add(fn); best_sim=max(best_sim,1.0); continue
+        if item.get('phrase'): continue
         dtoks=d['ftoks'][fn]
         if item['toks'] and all(any(qt==dt or (len(qt)>=3 and qt in dt) for dt in dtoks) for qt in item['toks']):
             matched_fields.add(fn); best_sim=max(best_sim,0.9)
