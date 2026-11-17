@@ -35,6 +35,7 @@ jobs:
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             TAG="${INPUT_TAG}"
           fi
+          export RELEASE_TAG="${TAG}"
           echo "RELEASE_TAG=${TAG}" >> "$GITHUB_ENV"
 
           mkdir -p dist
