@@ -1,0 +1,544 @@
+#!/usr/bin/env python3
+"""taskboard: filesystem-native task coordination for coding-agent sessions."""
+import argparse, collections, contextlib, datetime as dt, difflib, json, math, os, re, shlex, sys, tempfile, time
+from pathlib import Path
+
+VERSION = '0.4.0'
+START, END = '<!-- TASKBOARD:START -->', '<!-- TASKBOARD:END -->'
+DEFAULT_ENV = {
+    'codex': ['CODEX_THREAD_ID'],
+    'claude-code': ['CLAUDE_CODE_SESSION_ID'],
+    'opencode': ['OPENCODE_SESSION_ID'],
+    'deepseek-harness': ['DSH_SESSION_ID'],
+    'pi': ['PI_SESSION_ID'],
+    'antigravity': ['ANTIGRAVITY_SESSION_ID', 'GEMINI_SESSION_ID'],
+    'hermes': ['HERMES_SESSION_ID'],
+    'goose': ['GOOSE_SESSION_ID'],
+    'openclaw': ['OPENCLAW_SESSION_ID', 'OPENCLAW_SESSION_KEY'],
+    'qoder': ['QODER_SESSION_ID'],
+    'cursor': ['CURSOR_SESSION_ID', 'CURSOR_TRACE_ID'],
+    'kiro': ['KIRO_SESSION_ID'],
+}
+
+def now(): return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+def atomic(path, content):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix='.taskboard-', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(content); f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        try: os.unlink(tmp)
+        except FileNotFoundError: pass
+
+def frontmatter(data, body=''):
+    return '---\n' + ''.join(f'{k}: {json.dumps(v, ensure_ascii=False)}\n' for k,v in data.items()) + '---\n' + (('\n'+body.rstrip()+'\n') if body else '')
+def read_md(path):
+    raw = path.read_text(encoding='utf-8')
+    if not raw.startswith('---\n'): raise ValueError(f'{path}: missing frontmatter')
+    _, head, body = raw.split('---', 2); data = {}
+    for line in head.splitlines():
+        if line.strip():
+            k, v = line.split(':', 1); data[k.strip()] = json.loads(v.strip())
+    data['_body'] = body.strip(); return data
+
+def find_root():
+    p = Path.cwd().resolve()
+    for x in (p, *p.parents):
+        if (x/'.taskboard').is_dir(): return x
+    raise RuntimeError('No .taskboard project. Run `taskboard init` in the project root.')
+def P(root):
+    d=root/'.taskboard'; return {'dir':d,'tasks':d/'tasks','events':d/'events.jsonl','config':d/'config.json'}
+@contextlib.contextmanager
+def lock(d):
+    f=open(d/'.lock','a+b')
+    try:
+        if os.name=='nt':
+            import msvcrt
+            f.seek(0)
+            if not f.read(1): f.seek(0); f.write(b'0'); f.flush()
+            f.seek(0); deadline=time.time()+8
+            while True:
+                try: msvcrt.locking(f.fileno(),msvcrt.LK_NBLCK,1); break
+                except OSError:
+                    if time.time()>deadline: raise RuntimeError('timed out waiting for project lock')
+                    time.sleep(.05)
+        else:
+            import fcntl; fcntl.flock(f.fileno(),fcntl.LOCK_EX)
+        yield
+    finally:
+        if os.name=='nt':
+            import msvcrt
+            f.seek(0)
+            try: msvcrt.locking(f.fileno(),msvcrt.LK_UNLCK,1)
+            except OSError: pass
+        else:
+            import fcntl; fcntl.flock(f.fileno(),fcntl.LOCK_UN)
+        f.close()
+GLOBAL_CFG=Path(__file__).resolve().parent/'config.json'
+def merge_cfg(base,over):
+    res=dict(base)
+    for k,v in over.items():
+        if k=='harness_env' and isinstance(v,dict) and isinstance(res.get(k),dict):
+            res[k]={**res[k],**v}
+        else:
+            res[k]=v
+    return res
+def cfg(root=None):
+    c={'version':1,'context_file':['AGENTS.md'],'auto_sync':True,'harness_env':dict(DEFAULT_ENV),'max_context_tasks':30,'max_recent_events':8}
+    if GLOBAL_CFG.exists():
+        c=merge_cfg(c,json.loads(GLOBAL_CFG.read_text(encoding='utf-8')))
+    if root is not None and P(root)['config'].exists():
+        c=merge_cfg(c,json.loads(P(root)['config'].read_text(encoding='utf-8')))
+    return c
+def events(root):
+    p=P(root)['events']
+    if not p.exists(): return []
+    out=[]
+    for line in p.read_text(encoding='utf-8').splitlines():
+        try: out.append(json.loads(line))
+        except ValueError: pass
+    return out
+def log(root, kind, **kw):
+    with open(P(root)['events'],'a',encoding='utf-8') as f:
+        f.write(json.dumps({'at':now(),'type':kind,**kw},ensure_ascii=False)+'\n'); f.flush(); os.fsync(f.fileno())
+def task_path(root, tid):
+    if not re.fullmatch(r'[A-Za-z0-9_-]+',tid): raise ValueError('invalid task ID')
+    return P(root)['tasks']/(tid+'.md')
+def read_tasks(root):
+    out={}
+    for f in P(root)['tasks'].glob('*.md'):
+        t=read_md(f); out[t['id']]=t
+    return out
+def save_task(root,t): atomic(task_path(root,t['id']),frontmatter({k:v for k,v in t.items() if not k.startswith('_')},t.get('_body','')))
+def init(context_files):
+    root=Path.cwd().resolve(); p=P(root); p['tasks'].mkdir(parents=True,exist_ok=True)
+    if not p['config'].exists():
+        base=cfg()
+        if context_files is not None:
+            base['context_file']=[context_files] if isinstance(context_files,str) else context_files
+        atomic(p['config'],json.dumps(base,indent=2)+'\n')
+    if not p['events'].exists(): atomic(p['events'],'')
+    print('Initialized',p['dir'])
+def detect(root,harness=None,sid=None):
+    if sid:
+        if not harness: raise RuntimeError('--harness is required with --sid')
+        return harness,sid
+    if os.environ.get('TASKBOARD_SID'): return os.environ.get('TASKBOARD_HARNESS','custom'),os.environ['TASKBOARD_SID']
+    envmap=cfg(root).get('harness_env',DEFAULT_ENV)
+    if harness:
+        for name in envmap.get(harness,[]):
+            if os.environ.get(name): return harness,os.environ[name]
+        raise RuntimeError(f'No SID found for {harness}; configure its environment variable or pass --sid')
+    found=[]
+    for h,names in envmap.items():
+        for name in names:
+            if os.environ.get(name): found.append((h,os.environ[name])); break
+    if len(found)>1: raise RuntimeError('Ambiguous Harness identity; choose --harness')
+    if not found:
+        names=', '.join(sorted({n for ns in envmap.values() for n in ns}))
+        raise RuntimeError(f'Cannot detect real Harness SID. Checked: {names}. No synthetic SID will be created.')
+    return found[0]
+def actor(root,harness=None,sid=None):
+    h,s=detect(root,harness,sid); return {'harness':h,'sid':s}
+def status(t,ts):
+    if t.get('state')=='done': return 'DONE'
+    if t.get('state')=='blocked': return 'BLOCKED'
+    if t.get('state')=='doing': return 'IN_PROGRESS'
+    if any(d in ts and ts[d].get('state')!='done' for d in t.get('depends_on',[])): return 'WAITING'
+    return 'READY'
+def add_task(root,title,desc=None):
+    tid='t-'+os.urandom(4).hex(); t={'id':tid,'title':title,'state':'open','depends_on':[],'participants':[],'blocked_reason':'','created_at':now(),'updated_at':now(),'_body':desc.strip() if desc else ''}
+    save_task(root,t); kw={'desc':desc.strip()} if desc else {}; log(root,'task_created',task=tid,title=title,**kw); return t
+def dep_add(root,tid,need):
+    ts=read_tasks(root)
+    if tid not in ts or need not in ts: raise RuntimeError('both task IDs must exist')
+    graph={k:list(v.get('depends_on',[])) for k,v in ts.items()}; graph[tid]=list(set(graph[tid]+[need]))
+    def reaches(a,b,seen):
+        if a==b:return True
+        if a in seen:return False
+        seen.add(a); return any(reaches(n,b,seen) for n in graph.get(a,[]))
+    if reaches(need,tid,set()): raise RuntimeError('dependency would create a cycle')
+    ts[tid]['depends_on']=graph[tid]; ts[tid]['updated_at']=now(); save_task(root,ts[tid]); log(root,'dependency_added',task=tid,needs=need)
+def wait_tasks(root,tids,ready=False,timeout=None):
+    if timeout is not None and timeout<0: raise ValueError('--timeout must be >= 0')
+    deadline=None if timeout is None else time.monotonic()+timeout
+    while True:
+        with lock(P(root)['dir']):
+            ts=read_tasks(root)
+            pending=[]
+            for tid in tids:
+                if tid not in ts: raise RuntimeError('unknown task '+tid)
+                t=ts[tid]; st=status(t,ts)
+                if st=='BLOCKED':
+                    reason=t.get('blocked_reason','')
+                    raise RuntimeError(f'task {tid} is blocked'+(': '+reason if reason else ''))
+                if ready:
+                    for d in t.get('depends_on',[]):
+                        if d in ts and ts[d].get('state')=='blocked':
+                            reason=ts[d].get('blocked_reason','')
+                            raise RuntimeError(f'prerequisite {d} is blocked'+(': '+reason if reason else ''))
+                    if st=='WAITING': pending.append(tid)
+                else:
+                    if st!='DONE': pending.append(tid)
+        if not pending:
+            label='Ready' if ready else 'Done'
+            print(f"{label}: {', '.join(tids)}")
+            return
+        if deadline is not None:
+            rem=deadline-time.monotonic()
+            if rem<=0: raise RuntimeError('timed out waiting for '+', '.join(pending))
+            time.sleep(min(1.0,rem))
+        else:
+            time.sleep(1.0)
+def add_participant(t,a):
+    ref={'harness':a['harness'],'sid':a['sid']}
+    if ref not in t['participants']: t['participants'].append(ref)
+def doing(root,tid,a):
+    ts=read_tasks(root)
+    if tid not in ts: raise RuntimeError('unknown task '+tid)
+    t=ts[tid]
+    if t.get('state')=='done': raise RuntimeError('task is done')
+    st=status(t,ts)
+    if st=='WAITING': raise RuntimeError('task is waiting for '+', '.join(d for d in t.get('depends_on',[]) if d in ts and ts[d].get('state')!='done'))
+    if st=='BLOCKED': raise RuntimeError('task is blocked; run taskboard unblock first')
+    t['state']='doing'; add_participant(t,a); t['updated_at']=now(); save_task(root,t)
+    log(root,'task_claimed',task=tid,**a)
+def append_note(t,text,a):
+    line=f"- [{now()}] {a['harness']}:{a['sid']}: {text.strip()}"
+    body=t.get('_body','').strip()
+    t['_body']=(body+'\n'+line) if body else line
+def note_task(root,tid,text,a):
+    ts=read_tasks(root)
+    if tid not in ts: raise RuntimeError('unknown task '+tid)
+    t=ts[tid]; append_note(t,text,a); add_participant(t,a); t['updated_at']=now()
+    save_task(root,t); log(root,'task_noted',task=tid,note=text.strip(),**a)
+def done(root,tid,a,note_text=None):
+    ts=read_tasks(root)
+    if tid not in ts: raise RuntimeError('unknown task '+tid)
+    t=ts[tid]; t['state']='done'; t['blocked_reason']=''
+    if note_text: append_note(t,note_text,a)
+    add_participant(t,a); t['updated_at']=now()
+    save_task(root,t); kw={'note':note_text.strip()} if note_text else {}; log(root,'task_done',task=tid,**kw,**a)
+def block(root,tid,reason,a):
+    ts=read_tasks(root)
+    if tid not in ts: raise RuntimeError('unknown task '+tid)
+    t=ts[tid]; t['state']='blocked'; t['blocked_reason']=reason; add_participant(t,a); t['updated_at']=now()
+    save_task(root,t); log(root,'task_blocked',task=tid,reason=reason,**a)
+
+TASK_WEIGHTS={'id':4.0,'title':3.0,'blocked':2.2,'body':1.5,'meta':1.0}
+EVENT_WEIGHTS={'task':2.5,'text':2.5,'type':1.5,'actor':1.2}
+CJK_RE=re.compile(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+')
+WORD_RE=re.compile(r'[A-Za-z0-9_-]+|[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+')
+
+def tokenize(text):
+    if not text: return []
+    toks=[]
+    for m in WORD_RE.finditer(text):
+        seg=m.group(0)
+        if CJK_RE.fullmatch(seg):
+            if len(seg)==1: toks.append(seg)
+            else:
+                for i in range(len(seg)-1): toks.append(seg[i:i+2])
+                if len(seg)<=4: toks.append(seg)
+        else:
+            low=seg.lower()
+            toks.append(low)
+            parts=[p for p in re.split(r'[-_]+',seg) if p]
+            for p in parts:
+                pl=p.lower()
+                if pl!=low: toks.append(pl)
+                camel=re.findall(r'[A-Z]+(?=[A-Z][a-z]|\d|$)|[A-Z]?[a-z]+|\d+',p)
+                if len(camel)>1:
+                    for c in camel:
+                        cl=c.lower()
+                        if cl!=pl: toks.append(cl)
+    return toks
+
+def parse_query(raw_parts,filters):
+    raw=' '.join(raw_parts).strip()
+    try: parts=shlex.split(raw) if raw else []
+    except ValueError: parts=raw.split()
+    groups=[[]]; negs=[]
+    for tok in parts:
+        if tok=='OR':
+            if groups[-1]: groups.append([])
+            continue
+        is_neg=tok.startswith('-') and len(tok)>1
+        body=tok[1:] if is_neg else tok
+        if ':' in body and not body.startswith('"'):
+            k,v=body.split(':',1); kl=k.lower()
+            if kl in ('status','harness','sid','task','id','type','since','before') and v:
+                if kl=='id': kl='task'
+                if kl=='status': filters['statuses'].update(x.upper() for x in v.split(',') if x)
+                elif kl=='type':
+                    for x in v.lower().split(','):
+                        if x in ('task','tasks'): filters['kinds'].add('task')
+                        elif x in ('event','events'): filters['kinds'].add('event')
+                elif kl in ('harness','sid','task','since','before'): filters[kl]=v
+                continue
+        item={'raw':body.lower(),'toks':tokenize(body),'phrase':' ' in body or CJK_RE.search(body) is not None and len(body)>=2}
+        if is_neg: negs.append(item)
+        else: groups[-1].append(item)
+    groups=[g for g in groups if g]
+    return groups,negs,filters
+
+def doc_from_task(t,ts):
+    st=status(t,ts)
+    parts=[f"{x.get('harness','')}:{x.get('sid','')}" for x in t.get('participants',[])]
+    fields={'id':t['id'],'title':t.get('title',''),'blocked':t.get('blocked_reason',''),'body':t.get('_body',''),'meta':' '.join(t.get('depends_on',[])+parts+[st])}
+    return {'kind':'task','id':t['id'],'status':st,'ts':t.get('updated_at',t.get('created_at','')),'task':t,'fields':fields,'weights':TASK_WEIGHTS,'harnesses':{x.get('harness','') for x in t.get('participants',[])},'sids':{x.get('sid','') for x in t.get('participants',[])}}
+
+def doc_from_event(e):
+    actor_vals=[e.get('harness',''),e.get('sid',''),e.get('from_harness',''),e.get('from_sid',''),e.get('to_harness',''),e.get('to_sid','')]
+    text_vals=[e.get('title',''),e.get('desc',''),e.get('reason',''),e.get('note','')]
+    fields={'task':e.get('task',''),'type':e.get('type',''),'text':' '.join(v for v in text_vals if v),'actor':' '.join(v for v in actor_vals if v)}
+    hs={v for v in (e.get('harness'),e.get('from_harness'),e.get('to_harness')) if v}
+    ss={v for v in (e.get('sid'),e.get('from_sid'),e.get('to_sid')) if v}
+    return {'kind':'event','id':e.get('task',''),'status':'','ts':e.get('at',''),'event':e,'fields':fields,'weights':EVENT_WEIGHTS,'harnesses':hs,'sids':ss}
+
+def pass_filters(d,f):
+    if f['kinds'] and d['kind'] not in f['kinds']: return False
+    if f['statuses']:
+        if d['kind']!='task' or d['status'] not in f['statuses']: return False
+    if f['harness'] and f['harness'] not in d['harnesses']: return False
+    if f['sid'] and f['sid'] not in d['sids']: return False
+    if f['task'] and d['id']!=f['task']: return False
+    if f['since'] and d['ts']<f['since']: return False
+    if f['before'] and d['ts']>f['before']: return False
+    return True
+
+def term_hits_doc(item,d,fuzzy=False):
+    raw=item['raw']; matched_fields=set(); best_sim=0.0
+    for fn,val in d['fields'].items():
+        if not val: continue
+        vlow=val.lower()
+        if raw and raw in vlow:
+            matched_fields.add(fn); best_sim=max(best_sim,1.0); continue
+        dtoks=d['ftoks'][fn]
+        if item['toks'] and all(any(qt==dt or (len(qt)>=3 and qt in dt) for dt in dtoks) for qt in item['toks']):
+            matched_fields.add(fn); best_sim=max(best_sim,0.9)
+        elif fuzzy and item['toks']:
+            ok=True; sim_sum=0.0
+            for qt in item['toks']:
+                if len(qt)<3: ok=False; break
+                best=max((difflib.SequenceMatcher(None,qt,dt).ratio() for dt in dtoks),default=0.0)
+                if best<0.78: ok=False; break
+                sim_sum+=best
+            if ok: matched_fields.add(fn); best_sim=max(best_sim,sim_sum/len(item['toks']))
+    return matched_fields,best_sim
+
+def search_cmd(root,a):
+    filters={'statuses':set(),'kinds':set(),'harness':a.harness,'sid':a.sid,'task':None,'since':a.since,'before':None}
+    if a.status:
+        for s in a.status: filters['statuses'].update(x.upper() for x in s.split(',') if x)
+    if a.tasks_only: filters['kinds'].add('task')
+    if a.events_only: filters['kinds'].add('event')
+    groups,negs,filters=parse_query(a.query,filters)
+    ts=read_tasks(root)
+    docs=[doc_from_task(t,ts) for t in ts.values()]+[doc_from_event(e) for e in events(root)]
+    docs=[d for d in docs if pass_filters(d,filters)]
+    for d in docs:
+        d['ftoks']={fn:tokenize(val) for fn,val in d['fields'].items()}
+        d['fcnt']={fn:collections.Counter(toks) for fn,toks in d['ftoks'].items()}
+    if not groups and not negs:
+        ranked=[(1.0,d,set()) for d in docs]
+    else:
+        n_docs=max(len(docs),1)
+        all_fields=set(TASK_WEIGHTS)|set(EVENT_WEIGHTS)
+        avgdl={fn:max(sum(len(d['ftoks'].get(fn,[])) for d in docs)/n_docs,1.0) for fn in all_fields}
+        df=collections.Counter()
+        for d in docs:
+            seen={t for toks in d['ftoks'].values() for t in toks}
+            for t in seen: df[t]+=1
+        def run_match(fuzzy=False):
+            out=[]
+            for d in docs:
+                if any(term_hits_doc(ng,d,fuzzy=False)[0] for ng in negs): continue
+                if not groups:
+                    out.append((1.0,d,set())); continue
+                best_score=0.0; best_fields=set(); matched_any=False
+                for grp in groups:
+                    grp_fields=set(); grp_ok=True; qtoks=[]; sim_bonus=0.0
+                    for it in grp:
+                        mf,sim=term_hits_doc(it,d,fuzzy=fuzzy)
+                        if not mf: grp_ok=False; break
+                        grp_fields|=mf; qtoks.extend(it['toks']); sim_bonus+=sim
+                    if grp_ok:
+                        matched_any=True; k1,b=1.2,0.75; score=0.0
+                        for qt in set(qtoks):
+                            idf=math.log((n_docs-df.get(qt,0)+0.5)/(df.get(qt,0)+0.5)+1.0)
+                            tf_norm=0.0
+                            for fn,cnt in d['fcnt'].items():
+                                tf=cnt.get(qt,0)
+                                if not tf and len(qt)>=3: tf=0.6*sum(c for dt,c in cnt.items() if qt in dt)
+                                if tf:
+                                    dl=max(len(d['ftoks'][fn]),1)
+                                    tf_norm+=d['weights'][fn]*(tf/(1-b+b*(dl/avgdl[fn])))
+                            if tf_norm>0: score+=idf*(tf_norm*(k1+1))/(tf_norm+k1)
+                        for it in grp:
+                            if it['raw']==d['fields'].get('id','').lower(): score+=5.0
+                            elif it['raw'] in d['fields'].get('title','').lower() or it['raw'] in d['fields'].get('text','').lower(): score+=1.5
+                        score+=sim_bonus*0.2+(0.3 if d['kind']=='task' else 0.0)
+                        if score>best_score: best_score=score; best_fields=grp_fields
+                if matched_any: out.append((best_score,d,best_fields))
+            return out
+        ranked=run_match(fuzzy=False)
+        if not ranked and not a.exact: ranked=run_match(fuzzy=True)
+    ranked.sort(key=lambda x:(-x[0],x[1]['ts']),reverse=False)
+    # Sort ties by timestamp descending
+    ranked.sort(key=lambda x:x[1]['ts'],reverse=True)
+    ranked.sort(key=lambda x:x[0],reverse=True)
+    total=len(ranked); limit=a.limit if a.limit and a.limit>0 else total
+    shown=ranked[:limit]
+    if a.json:
+        payload={'query':' '.join(a.query),'total':total,'results':[{'kind':d['kind'],'score':round(sc,4),'matched_fields':sorted(mf),**(d['task'] if d['kind']=='task' else d['event'])} for sc,d,mf in shown]}
+        print(json.dumps(payload,ensure_ascii=False,indent=2))
+        return
+    if not shown: print('No matches'); return
+    for sc,d,mf in shown:
+        tags=(' ['+','.join(sorted(mf))+']') if mf else ''
+        if d['kind']=='task':
+            t=d['task']; extra=f" — {t['blocked_reason']}" if d['status']=='BLOCKED' and t.get('blocked_reason') else ''
+            print(f"TASK  {t['id']}  {d['status']:<11} {t['title']}{extra}{tags}")
+        else:
+            e=d['event']; who=f"{e.get('harness','')}:{e.get('sid','')}" if e.get('sid') else ''
+            detail=''
+            if e.get('type')=='task_handoff': detail=f" ({e.get('from_sid','?')} -> {e.get('to_sid','?')})"
+            elif e.get('reason'): detail=f" ({e['reason']})"
+            elif e.get('note'): detail=f" ({e['note']})"
+            elif e.get('title'): detail=f" {e['title']}"
+            elif who: detail=f" by {who}"
+            print(f"EVENT {e.get('at','')}  {e.get('type',''):<16} {e.get('task','')}{detail}{tags}")
+    if total>len(shown): print(f'... {total-len(shown)} more matches (use --limit 0 to show all)')
+
+def auto_sync(root):
+    c=cfg(root)
+    if c.get('auto_sync',True) and c.get('context_file'):
+        sync(root,dry=False,quiet=True)
+def context_targets(c):
+    raw=c.get('context_file',['AGENTS.md'])
+    if isinstance(raw,str): return [raw] if raw else []
+    return [x for x in (raw or []) if x]
+def sync(root,dry=False,quiet=False):
+    c=cfg(root); targets=context_targets(c)
+    if not targets:
+        if not quiet:print('No context_file configured.')
+        return
+    ts=read_tasks(root); limit=int(c.get('max_context_tasks',30))
+    lines=[START,'## Shared Task Board']
+    for heading,st in [('In Progress','IN_PROGRESS'),('Ready Tasks','READY'),('Waiting','WAITING'),('Blocked','BLOCKED')]:
+        lines.extend(['',f'### {heading}']); group=[t for t in ts.values() if status(t,ts)==st]
+        for t in sorted(group,key=lambda x:x.get('created_at',''))[:limit]:
+            extra=''
+            if st=='WAITING':extra=' (waiting for '+', '.join(d for d in t.get('depends_on',[]) if d in ts and ts[d].get('state')!='done')+')'
+            if st=='BLOCKED' and t.get('blocked_reason'):extra=': '+t['blocked_reason']
+            lines.append(f"- `{t['id']}` {t['title']}{extra}")
+        if not group:lines.append('- None')
+    recent=[e for e in events(root) if e.get('type') in ('task_handoff','task_done','task_claimed')][-int(c.get('max_recent_events',8)):]
+    lines.extend(['','### Recent Activity'])
+    for e in reversed(recent):
+        if e['type']=='task_handoff': msg=f"`{e['task']}` handed off: `{e.get('from_sid','?')}` → `{e.get('to_sid','?')}`"
+        else: msg=f"`{e['task']}` {('completed' if e['type']=='task_done' else 'claimed')} by `{e.get('sid','')}`"
+        lines.append('- '+msg)
+    lines.append(END); generated='\n'.join(lines); updated=0
+    for rel in targets:
+        target=(root/rel).resolve()
+        try:target.relative_to(root.resolve())
+        except ValueError:raise RuntimeError('context_file must be inside project root')
+        old=target.read_text(encoding='utf-8') if target.exists() else ''
+        if START in old and END in old:
+            before,rest=old.split(START,1); _,after=rest.split(END,1); new=before.rstrip()+'\n\n'+generated+'\n'+after.lstrip('\n')
+        else:new=(old.rstrip()+'\n\n' if old.strip() else '')+generated+'\n'
+        if dry:
+            if len(targets)>1:print(f'=== {rel} ===')
+            print(new)
+        elif new!=old:
+            atomic(target,new);updated+=1
+            if not quiet:print('Updated '+str(target.relative_to(root)))
+    if not dry and not updated and not quiet:print('Context is already up to date.')
+def main():
+    ap=argparse.ArgumentParser(prog='taskboard'); ap.add_argument('--version',action='version',version=VERSION); sp=ap.add_subparsers(dest='cmd',required=True)
+    p=sp.add_parser('init');p.add_argument('--context-file',nargs='+',default=None)
+    for cmd in ('doing','done','block','handoff','note'):
+        p=sp.add_parser(cmd);p.add_argument('task_id');p.add_argument('--harness');p.add_argument('--sid')
+        if cmd=='block':p.add_argument('--reason',required=True)
+        if cmd=='handoff':p.add_argument('--to',required=True);p.add_argument('--to-harness');p.add_argument('--note')
+        if cmd=='done':p.add_argument('--note')
+        if cmd=='note':p.add_argument('message')
+    p=sp.add_parser('add');p.add_argument('title');p.add_argument('-d','--desc','--description',dest='desc')
+    p=sp.add_parser('list');p.add_argument('--all',action='store_true')
+    p=sp.add_parser('show');p.add_argument('task_id')
+    p=sp.add_parser('unblock');p.add_argument('task_id')
+    p=sp.add_parser('dep');sub=p.add_subparsers(dest='dep_cmd',required=True)
+    q=sub.add_parser('add');q.add_argument('task_id');q.add_argument('--needs',required=True)
+    q.add_argument('--wait',action='store_true');q.add_argument('--timeout',type=float)
+    p=sp.add_parser('wait');p.add_argument('task_ids',nargs='+');p.add_argument('--ready',action='store_true')
+    p.add_argument('--timeout',type=float)
+    p=sp.add_parser('status')
+    p=sp.add_parser('search');p.add_argument('query',nargs='*');p.add_argument('--status',action='append');p.add_argument('--harness');p.add_argument('--sid')
+    p.add_argument('--tasks-only',action='store_true');p.add_argument('--events-only',action='store_true');p.add_argument('--since')
+    p.add_argument('--limit',type=int,default=20);p.add_argument('--exact',action='store_true');p.add_argument('--json',action='store_true')
+    p=sp.add_parser('sync');p.add_argument('--dry-run',action='store_true');sp.add_parser('context')
+    a,unknown=ap.parse_known_args()
+    if unknown:
+        if a.cmd=='search' and all(u.startswith('-') and not u.startswith('--') and len(u)>1 for u in unknown):
+            a.query.extend(unknown)
+        else:
+            ap.error('unrecognized arguments: '+' '.join(unknown))
+    try:
+        if a.cmd=='init':init(a.context_file);return 0
+        root=find_root()
+        if a.cmd=='wait':
+            wait_tasks(root,a.task_ids,ready=a.ready,timeout=a.timeout)
+            return 0
+        with lock(P(root)['dir']):
+            if a.cmd=='add':t=add_task(root,a.title,a.desc);print(t['id'])
+            elif a.cmd in ('list','show'):
+                ts=read_tasks(root); selected=[ts[a.task_id]] if a.cmd=='show' and a.task_id in ts else list(ts.values())
+                if a.cmd=='show' and a.task_id not in ts:raise RuntimeError('unknown task')
+                for t in sorted(selected,key=lambda x:x['created_at']):
+                    st=status(t,ts)
+                    if a.cmd=='list' and not a.all and st=='DONE':continue
+                    print(f"{t['id']}  {st:<11} {t['title']}")
+                    if a.cmd=='show':
+                        print('Depends on: '+(', '.join(t.get('depends_on',[])) or 'none'))
+                        print('Participants: '+(', '.join(x['harness']+':'+x['sid'] for x in t.get('participants',[])) or 'none'))
+                        if t.get('blocked_reason'):print('Blocked: '+t['blocked_reason'])
+                        if t.get('_body'):print('Notes:\n'+t['_body'])
+            elif a.cmd in ('doing','done','block','handoff','note'):
+                who=actor(root,a.harness,a.sid); ts=read_tasks(root)
+                if a.cmd=='doing':doing(root,a.task_id,who);print('Now doing '+a.task_id)
+                elif a.cmd=='done':done(root,a.task_id,who,a.note);print('Completed '+a.task_id)
+                elif a.cmd=='block':block(root,a.task_id,a.reason,who);print('Blocked '+a.task_id)
+                elif a.cmd=='note':note_task(root,a.task_id,a.message,who);print('Noted '+a.task_id)
+                else:
+                    if a.task_id not in ts:raise RuntimeError('unknown task')
+                    t=ts[a.task_id]
+                    if a.note: append_note(t,a.note,who)
+                    add_participant(t,who); t['state']='open'; t['updated_at']=now(); save_task(root,t)
+                    kw={'note':a.note.strip()} if a.note else {}
+                    log(root,'task_handoff',task=a.task_id,from_harness=who['harness'],from_sid=who['sid'],to_harness=a.to_harness or who['harness'],to_sid=a.to,**kw)
+                    print(f'Handed off {a.task_id} to {a.to}')
+            elif a.cmd=='unblock':
+                ts=read_tasks(root)
+                if a.task_id not in ts:raise RuntimeError('unknown task')
+                t=ts[a.task_id];t['state']='open';t['blocked_reason']='';t['updated_at']=now();save_task(root,t);log(root,'task_unblocked',task=a.task_id);print('Unblocked '+a.task_id)
+            elif a.cmd=='dep':
+                dep_add(root,a.task_id,a.needs);print('Dependency added',flush=True)
+            elif a.cmd=='status':
+                ts=read_tasks(root);print(f'PROJECT {root.name}')
+                for st in ('IN_PROGRESS','READY','WAITING','BLOCKED','DONE'):
+                    group=[t for t in ts.values() if status(t,ts)==st]
+                    if group:
+                        print(st)
+                        for t in group:print(f"- {t['id']} {t['title']}")
+            elif a.cmd=='search':search_cmd(root,a)
+            elif a.cmd in ('sync','context'):sync(root,getattr(a,'dry_run',False) or a.cmd=='context')
+            if a.cmd in ('add','doing','done','block','handoff','note','unblock','dep'):auto_sync(root)
+        if a.cmd=='dep' and a.wait:
+            wait_tasks(root,[a.needs],timeout=a.timeout)
+        return 0
+    except (RuntimeError,ValueError,KeyError,OSError) as e:print('taskboard: error: '+str(e),file=sys.stderr);return 2
+if __name__=='__main__':raise SystemExit(main())
