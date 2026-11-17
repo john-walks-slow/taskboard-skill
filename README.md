@@ -10,20 +10,6 @@ A lightweight, filesystem-native task board for coordinating multi-agent coding 
 - **BM25F multi-field search**: supports boolean queries, inline filters, camelCase/snake_case splitting, CJK bigrams, and fuzzy fallback.
 - **Automatic board sync**: refreshes configured context files on every task state change.
 
-## Run
-
-```bash
-python skills/taskboard/scripts/taskboard init
-# Or add bin/taskboard to PATH / create an alias:
-alias taskboard="python /absolute/path/to/taskboard-skill/skills/taskboard/scripts/taskboard"
-```
-
-Specify one or more context files at init (or edit `config.json` anytime):
-
-```bash
-taskboard init --context-file AGENTS.md CLAUDE.md
-```
-
 ## Quick start
 
 Inside any supported Harness shell:
