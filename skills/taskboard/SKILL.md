@@ -1,6 +1,6 @@
 ---
 name: taskboard
-description: A shared task ledger for coordinating multi-step, parallel, or cross-session coding-agent work. MANDATORY\: ALWAYS use this skill before starting or resuming work (check `list`/`status`, claim with `doing`), when adding or waiting on prerequisite dependencies (`dep add --wait` / `wait`), when recording progress notes or blockers (`note` / `block`), when handing off or completing tasks (`handoff` / `done`), or when searching past task history (`search`).
+description: A shared task ledger for coordinating multi-step, parallel, or cross-session coding-agent work. (MANDATORY) ALWAYS use this skill before starting or resuming work (check `list`/`status`, claim with `doing`), when adding or waiting on prerequisite dependencies (`dep add --wait` / `wait`), when recording progress notes or blockers (`note` / `block`), when handing off or completing tasks (`handoff` / `done`), or when searching past task history (`search`).
 ---
 
 # Taskboard
