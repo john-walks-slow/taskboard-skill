@@ -1,25 +1,24 @@
-# taskboard 0.4
+# taskboard
 
-A tiny, filesystem-native task ledger for coordinating coding-agent work. It tracks task state and records which real Harness session performed each action. **Session identity is retained; Session lifecycle is not modeled.**
+A lightweight, filesystem-native task board for coordinating multi-agent coding work across sessions. Zero database, zero daemon, zero third-party dependencies (Python 3.9+).
 
-- Tasks are the primary objects.
-- The real Harness SID is attached to task events as the actor.
-- There are no Session records, active/inactive flags, or start/stop lifecycle commands.
-- Dependencies form a directed acyclic graph.
-- `events.jsonl` is the append-only activity history.
-- Context injection maintains a compact task-board snapshot in `AGENTS.md` or another configured file.
+一个基于本地文件系统的轻量多 Agent 共享任务看板，支持任务状态流转、依赖阻塞等待、纯标准库 BM25F 检索，以及多上下文文件（`AGENTS.md` / `CLAUDE.md` 等）自动同步。
 
-No database server, daemon, MCP server, or third-party Python packages. Requires Python 3.9+.
+- **Markdown + YAML frontmatter** per task under `.taskboard/tasks/`, paired with an append-only `events.jsonl` history.
+- **Automatic actor attribution**: detects the active Harness type and real session ID automatically on state changes.
+- **DAG dependencies & blocking wait**: `dep add --wait` and `wait` block until prerequisites finish, failing fast on blockers.
+- **BM25F multi-field search**: supports boolean queries, inline filters, camelCase/snake_case splitting, CJK bigrams, and fuzzy fallback.
+- **Automatic board sync**: refreshes configured context files on every task state change.
 
 ## Run
 
 ```bash
 python skills/taskboard/scripts/taskboard init
-# Put bin/taskboard on PATH, or create a shell alias:
+# Or add bin/taskboard to PATH / create an alias:
 alias taskboard="python /absolute/path/to/taskboard-skill/skills/taskboard/scripts/taskboard"
 ```
 
-To use another context file (for example `CLAUDE.md` or `GEMINI.md`):
+Specify one or more context files at init (or edit `config.json` anytime):
 
 ```bash
 taskboard init --context-file AGENTS.md CLAUDE.md
@@ -27,20 +26,24 @@ taskboard init --context-file AGENTS.md CLAUDE.md
 
 ## Quick start
 
-Inside a supported Harness Bash tool:
+Inside any supported Harness shell:
 
 ```bash
-taskboard add "Normalize URL identity"
+taskboard add "Normalize URL identity" --desc "Align canonical host/path rules"
 taskboard list
-# Use the task ID printed by add
 taskboard doing t-xxxxxxxx
+taskboard note t-xxxxxxxx "Added host normalization tests"
 taskboard status
-taskboard done t-xxxxxxxx
+taskboard done t-xxxxxxxx --note "All unit tests passing"
 ```
 
-No `start-session` or `conclude-session` is required. `doing`, `done`, `block`, and `handoff` detect the current real SID automatically and record it as the actor. Creating and listing tasks do not require a Harness identity.
+`doing`, `note`, `done`, `block`, and `handoff` automatically detect the active Harness and session ID. If auto-detection is unavailable, pass them explicitly:
 
-Default real-SID mappings:
+```bash
+taskboard doing t-xxxxxxxx --harness codex --sid REAL_THREAD_ID
+```
+
+## Supported Harnesses
 
 | Harness | Environment variable(s) |
 |---|---|
@@ -56,14 +59,6 @@ Default real-SID mappings:
 | Qoder | `QODER_SESSION_ID` |
 | Cursor | `CURSOR_SESSION_ID`, `CURSOR_TRACE_ID` |
 | Kiro | `KIRO_SESSION_ID` |
-
-If auto-detection is unavailable, explicitly pass the real identity:
-
-```bash
-taskboard doing t-xxxxxxxx --harness codex --sid REAL_THREAD_ID
-```
-
-Taskboard never fabricates a Session ID. If multiple Harness IDs are present, specify `--harness` rather than letting Taskboard guess.
 
 ## Skill installation paths
 
@@ -100,7 +95,7 @@ taskboard context
 
 ## Search
 
-`taskboard search` ranks tasks and events using zero-dependency multi-field BM25F scoring (`id` > `title` > `blocked_reason` > Markdown body > `participants`/`depends_on`; event values only, ignoring JSON keys):
+`taskboard search` ranks tasks and events with zero-dependency multi-field BM25F scoring (`id` > `title` > `blocked_reason` > Markdown body > metadata; event values only, ignoring JSON keys):
 
 ```bash
 # Multi-word AND, OR, negation, and quoted phrases
@@ -112,7 +107,7 @@ taskboard search status:READY,IN_PROGRESS harness:opencode --tasks-only
 taskboard search --since 2026-11-01 --limit 10 --json
 ```
 
-- Splits `camelCase`, `snake_case`, `kebab-case`, and CJK bigrams automatically.
+- Automatically splits `camelCase`, `snake_case`, `kebab-case`, and CJK bigrams.
 - Falls back to fuzzy matching on typos unless `--exact` is passed.
 
 ## Blocking wait
@@ -126,77 +121,54 @@ taskboard dep add t-bbbbbbbb --needs t-aaaaaaaa --wait
 # Wait for one or more tasks to become DONE
 taskboard wait t-aaaaaaaa t-cccccccc
 
-# Wait until a task's dependencies are all DONE (no longer WAITING)
+# Wait until all dependencies of a task are DONE (no longer WAITING)
 taskboard wait t-bbbbbbbb --ready --timeout 120
 ```
 
-- Waiting polls every 1 second and releases the project lock between polls so other sessions can run `taskboard done` or `taskboard block` without deadlocking.
-- `--timeout` is optional.
-- If a waited-on task (or a prerequisite under `--ready`) becomes `BLOCKED`, `wait` exits immediately with an error.
+- Polls every 1 second and releases the project lock between polls so other sessions can run `done` or `block` without deadlocking.
+- `--timeout` is optional; if a waited-on task or prerequisite becomes `BLOCKED`, `wait` exits immediately with an error.
 
-## Files and source of truth
+## Files and task statuses
 
 ```text
 .taskboard/
 ├── config.json
-├── tasks/       # one short Markdown record per task
-└── events.jsonl # append-only activity history, including actor Harness/SID
+├── tasks/       # one Markdown record per task
+└── events.jsonl # append-only activity history
 ```
 
-Task Markdown frontmatter is the canonical current state. The event log records who performed each transition. Task status is computed:
+Computed task statuses:
 
 - `DONE`: explicitly completed.
-- `BLOCKED`: explicitly blocked.
-- `IN_PROGRESS`: explicitly claimed with `taskboard doing`.
+- `BLOCKED`: explicitly blocked via `block`.
+- `IN_PROGRESS`: actively claimed via `doing`.
 - `WAITING`: has an unfinished dependency.
-- `READY`: otherwise available.
+- `READY`: available to claim.
 
-A handoff records the sender and intended recipient, then returns the task to `READY` (or `WAITING` if dependencies remain). The receiving session claims it with `taskboard doing TASK_ID`.
+A `handoff` records the sender, recipient, and optional note, then returns the task to `READY` (or `WAITING` if dependencies remain) for the receiving session to claim.
 
-## Context injection
+## Configuration & automatic context sync
 
-Every task state change (`add`, `doing`, `done`, `block`, `unblock`, `dep add`, `handoff`) automatically syncs the board snapshot into the configured context file. Only the content between `<!-- TASKBOARD:START -->` and `<!-- TASKBOARD:END -->` is replaced (or appended if missing). Configure the target in project `.taskboard/config.json` or global `skills/taskboard/scripts/config.json` (project overrides global) without re-running `init`:
+Every task state change (`add`, `doing`, `done`, `block`, `unblock`, `note`, `dep add`, `handoff`) automatically updates the configured context files between `<!-- TASKBOARD:START -->` and `<!-- TASKBOARD:END -->`, preserving all surrounding content.
 
-```json
-{ "context_file": ["AGENTS.md", "CLAUDE.md"], "auto_sync": true }
-```
-
-Set `"auto_sync": false` (or `"context_file": []`) to disable automatic sync. `taskboard sync [--dry-run]` and `taskboard context` remain available for manual sync or preview.
-
-## Custom Harness
-
-Edit `.taskboard/config.json`:
+Configuration is loaded in two layers (project overrides global; `harness_env` maps are merged):
+- **Global**: `skills/taskboard/scripts/config.json`
+- **Project**: `.taskboard/config.json`
 
 ```json
 {
+  "context_file": ["AGENTS.md", "CLAUDE.md"],
+  "auto_sync": true,
   "harness_env": {
-    "codex": ["CODEX_THREAD_ID"],
-    "claude-code": ["CLAUDE_CODE_SESSION_ID"],
-    "opencode": ["OPENCODE_SESSION_ID"],
-    "deepseek-harness": ["DSH_SESSION_ID"],
-    "pi": ["PI_SESSION_ID"],
-    "antigravity": ["ANTIGRAVITY_SESSION_ID", "GEMINI_SESSION_ID"],
-    "hermes": ["HERMES_SESSION_ID"],
-    "goose": ["GOOSE_SESSION_ID"],
-    "openclaw": ["OPENCLAW_SESSION_ID", "OPENCLAW_SESSION_KEY"],
-    "qoder": ["QODER_SESSION_ID"],
-    "cursor": ["CURSOR_SESSION_ID", "CURSOR_TRACE_ID"],
-    "kiro": ["KIRO_SESSION_ID"],
     "my-harness": ["MY_AGENT_SESSION_ID"]
   }
 }
 ```
 
-`TASKBOARD_HARNESS` plus `TASKBOARD_SID` can also explicitly provide identity to child processes.
+Set `"auto_sync": false` or `"context_file": []` to disable automatic sync. `TASKBOARD_HARNESS` and `TASKBOARD_SID` can also provide identity explicitly via environment variables.
 
 ## Reliability boundaries
 
-- Atomic file replacement and an OS-level project lock serialize CLI writers.
-- Use a local filesystem. Do not assume NFS or cross-machine coordination is safe.
-- A real SID identifies an actor; it does not prove that the corresponding Harness process is currently alive.
-- Handoffs are events, not process control. Taskboard cannot start, stop, or notify another Agent.
-- Search uses pure-Python BM25F ranking over task records and event values, with `difflib` fuzzy fallback.
-- Human edits to task Markdown are supported. Manually editing `events.jsonl` is not recommended.
-- The event log is append-only by convention, not a tamper-proof audit log.
-
-Taskboard does not store requirements, acceptance criteria, implementation plans, source diffs, or full transcripts. Keep those in the project's existing systems.
+- Atomic file replacement and an OS-level project lock serialize CLI writers on a local filesystem.
+- Handoffs and SIDs are coordination records, not process control; Taskboard does not start, stop, or message external Agent processes.
+- Human edits to task Markdown are supported; manual edits to `events.jsonl` are not recommended.
