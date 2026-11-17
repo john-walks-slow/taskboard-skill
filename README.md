@@ -15,6 +15,7 @@ A lightweight, filesystem-native task board for coordinating multi-agent coding 
 Inside any supported Harness shell:
 
 ```bash
+taskboard init
 taskboard add "Normalize URL identity" --desc "Align canonical host/path rules"
 taskboard list
 taskboard doing t-xxxxxxxx
