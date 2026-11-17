@@ -3,7 +3,7 @@
 import argparse, collections, contextlib, datetime as dt, difflib, json, math, os, re, shlex, sys, tempfile, time
 from pathlib import Path
 
-VERSION = '0.4.0'
+VERSION = '0.1.0'
 START, END = '<!-- TASKBOARD:START -->', '<!-- TASKBOARD:END -->'
 DEFAULT_ENV = {
     'codex': ['CODEX_THREAD_ID'],

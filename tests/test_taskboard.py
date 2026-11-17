@@ -195,7 +195,7 @@ class TaskTest(unittest.TestCase):
    e=os.environ.copy()
    for k in HARNESS_VARS:e.pop(k,None)
    p=subprocess.run([sys.executable,str(bin_cli),'--version'],cwd=d,env=e,text=True,capture_output=True)
-   self.assertEqual(p.returncode,0);self.assertIn('0.4.0',p.stdout)
+   self.assertEqual(p.returncode,0);self.assertIn('0.1.0',p.stdout)
    self.runcli(d,'init')
    a=self.runcli(d,'add','Task A').stdout.strip()
    b=self.runcli(d,'add','Task B').stdout.strip()
@@ -274,7 +274,7 @@ class TaskTest(unittest.TestCase):
    self.assertNotIn('more matches',all_out);self.assertIn(a,all_out);self.assertIn(d2,all_out)
  def test_version_and_no_lifecycle_commands(self):
   with tempfile.TemporaryDirectory() as d:
-   self.assertIn('0.4.0',self.runcli(d,'--version').stdout)
+   self.assertIn('0.1.0',self.runcli(d,'--version').stdout)
    self.runcli(d,'init')
    for cmd in ('start','stop','start-session','conclude-session'):
     self.runcli(d,cmd,ok=False)
