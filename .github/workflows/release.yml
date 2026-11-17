@@ -27,7 +27,7 @@ jobs:
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
 
-      - name: Build release archives
+      - name: Build release archive
         env:
           INPUT_TAG: ${{ inputs.tag }}
         run: |
@@ -45,22 +45,17 @@ jobs:
 
           tag = os.environ["RELEASE_TAG"]
           dist = Path("dist")
+          src_dir = Path("skills/taskboard")
 
-          def pack(out_path, src_dir, arc_prefix):
-              with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                  for p in sorted(Path(src_dir).rglob("*")):
-                      if any(part in (".git", ".taskboard", "__pycache__", "dist") for part in p.parts):
-                          continue
-                      if p.suffix == ".pyc" or not p.is_file():
-                          continue
-                      arc = Path(arc_prefix) / p.relative_to(src_dir)
-                      zi = zipfile.ZipInfo.from_file(p, str(arc))
-                      if p.name == "taskboard":
-                          zi.external_attr = (0o100755 & 0xFFFF) << 16
-                      zf.writestr(zi, p.read_bytes())
-
-          pack(dist / f"taskboard-skill-{tag}.zip", ".", "taskboard-skill")
-          pack(dist / f"taskboard-{tag}.zip", "skills/taskboard", "taskboard")
+          with zipfile.ZipFile(dist / f"taskboard-{tag}.zip", "w", zipfile.ZIP_DEFLATED) as zf:
+              for p in sorted(src_dir.rglob("*")):
+                  if "__pycache__" in p.parts or p.suffix == ".pyc" or not p.is_file():
+                      continue
+                  arc = Path("taskboard") / p.relative_to(src_dir)
+                  zi = zipfile.ZipInfo.from_file(p, str(arc))
+                  if p.name == "taskboard":
+                      zi.external_attr = (0o100755 & 0xFFFF) << 16
+                  zf.writestr(zi, p.read_bytes())
           PY
           (cd dist && sha256sum *.zip > SHA256SUMS.txt)
 
