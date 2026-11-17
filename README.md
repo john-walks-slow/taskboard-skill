@@ -12,10 +12,15 @@ A lightweight, filesystem-native task board for coordinating multi-agent coding 
 
 ## Quick start
 
+Initialize once from the project root:
+
+```bash
+python .agents/skills/taskboard/scripts/taskboard init --context-file AGENTS.md
+```
+
 Inside any supported Harness shell:
 
 ```bash
-taskboard init
 taskboard add "Normalize URL identity" --desc "Align canonical host/path rules"
 taskboard list
 taskboard doing t-xxxxxxxx
