@@ -195,7 +195,7 @@ class TaskTest(unittest.TestCase):
    e=os.environ.copy()
    for k in HARNESS_VARS:e.pop(k,None)
    p=subprocess.run([sys.executable,str(bin_cli),'--version'],cwd=d,env=e,text=True,capture_output=True)
-   self.assertEqual(p.returncode,0);self.assertIn('0.1.3',p.stdout)
+   self.assertEqual(p.returncode,0);self.assertIn('0.1.4',p.stdout)
    self.runcli(d,'init')
    a=self.runcli(d,'add','Task A').stdout.strip()
    b=self.runcli(d,'add','Task B').stdout.strip()
@@ -289,13 +289,13 @@ class TaskTest(unittest.TestCase):
  def test_watch_event_and_cursor(self):
   with tempfile.TemporaryDirectory() as d:
    self.runcli(d,'init')
-   self.runcli(d,'watch','unexpected-task-id',ok=False)
+   self.runcli(d,'watch-next','unexpected-task-id',ok=False)
    tid=self.runcli(d,'add','Watch target').stdout.strip()
    def add_note():
     time.sleep(0.2)
     self.runcli(d,'note',tid,'new event',env={'PI_SESSION_ID':'watcher'})
    th=threading.Thread(target=add_note);th.start()
-   result=json.loads(self.runcli(d,'watch','--event','task.noted','--timeout','3','--json').stdout)
+   result=json.loads(self.runcli(d,'watch-next','--event','task.noted','--timeout','3','--json').stdout)
    th.join()
    self.assertEqual(result['event']['type'],'task_noted')
    self.assertEqual(result['event']['task'],tid)
@@ -306,14 +306,14 @@ class TaskTest(unittest.TestCase):
     time.sleep(0.2)
     self.runcli(d,'add','Next event')
    th=threading.Thread(target=add_task);th.start()
-   board_event=json.loads(self.runcli(d,'watch','--event','task.created','--since',str(cursor),'--timeout','3','--json').stdout)
+   board_event=json.loads(self.runcli(d,'watch-next','--event','task.created','--since',str(cursor),'--timeout','3','--json').stdout)
    th.join()
    self.assertEqual(board_event['event']['type'],'task_created')
    self.assertIn('DONE:',self.runcli(d,'done',tid,'--harness','pi','--sid','watcher').stdout.replace('Completed','DONE:'))
  def test_assignment_self_add_doing_handoff_and_reassignment(self):
   with tempfile.TemporaryDirectory() as d:
    self.runcli(d,'init')
-   a=self.runcli(d,'add','Assigned at creation','--claim',env={'OPENCODE_SESSION_ID':'worker-a'}).stdout.strip()
+   a=self.runcli(d,'add','Assigned at creation','--self',env={'OPENCODE_SESSION_ID':'worker-a'}).stdout.strip()
    self.assertIn('Assignee: opencode:worker-a',self.runcli(d,'show',a).stdout)
    self.runcli(d,'doing',a,env={'OPENCODE_SESSION_ID':'worker-a'})
    self.runcli(d,'note',a,'progress',env={'OPENCODE_SESSION_ID':'worker-b'},ok=False)
@@ -324,6 +324,14 @@ class TaskTest(unittest.TestCase):
    self.runcli(d,'done',a,env={'OPENCODE_SESSION_ID':'worker-b'})
    self.assertIn('Assignee: opencode:worker-b',self.runcli(d,'show',a).stdout)
    self.assertIn('task_assigned',(Path(d)/'.taskboard'/'events.jsonl').read_text())
+ def test_doing_implicitly_assigns_and_is_exclusive(self):
+  with tempfile.TemporaryDirectory() as d:
+   self.runcli(d,'init'); tid=self.runcli(d,'add','Shared work').stdout.strip()
+   self.runcli(d,'doing',tid,env={'PI_SESSION_ID':'worker-a'})
+   shown=self.runcli(d,'show',tid).stdout
+   self.assertIn('Assignee: pi:worker-a',shown)
+   self.runcli(d,'doing',tid,env={'PI_SESSION_ID':'worker-b'},ok=False)
+
  def test_assignment_is_atomic_for_competing_workers(self):
   with tempfile.TemporaryDirectory() as d:
    self.runcli(d,'init'); tid=self.runcli(d,'add','Race').stdout.strip()
@@ -332,7 +340,7 @@ class TaskTest(unittest.TestCase):
     env=os.environ.copy()
     for key in HARNESS_VARS: env.pop(key,None)
     env['PI_SESSION_ID']=sid
-    results.append(subprocess.run([sys.executable,str(CLI),'assign',tid,'--claim'],cwd=d,env=env,text=True,capture_output=True))
+    results.append(subprocess.run([sys.executable,str(CLI),'assign',tid,'--self'],cwd=d,env=env,text=True,capture_output=True))
    a=threading.Thread(target=assign,args=('worker-a',)); b=threading.Thread(target=assign,args=('worker-b',))
    a.start(); b.start(); a.join(); b.join()
    self.assertEqual(sum(x.returncode==0 for x in results),1)
@@ -348,7 +356,7 @@ class TaskTest(unittest.TestCase):
    self.assertIn('READY',shown); self.assertIn('Assignee: unassigned',shown)
  def test_version_and_no_lifecycle_commands(self):
   with tempfile.TemporaryDirectory() as d:
-   self.assertIn('0.1.3',self.runcli(d,'--version').stdout)
+   self.assertIn('0.1.4',self.runcli(d,'--version').stdout)
    self.runcli(d,'init')
    for cmd in ('start','stop','start-session','conclude-session'):
     self.runcli(d,cmd,ok=False)

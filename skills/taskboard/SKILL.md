@@ -1,15 +1,15 @@
 ---
 name: taskboard
-description: A shared task ledger for coordinating multi-step, parallel, or cross-session coding-agent work. (MANDATORY) ALWAYS use this skill before starting or resuming work (check `list`/`status`, verify assignment, start with `doing`), when adding dependencies or waiting for task states/events (`dep add` / `wait` / `watch`), when recording progress notes or blockers (`note` / `block`), when handing off or completing tasks (`handoff` / `done`), or when searching past task history (`search`).
+description: A shared task ledger for coordinating multi-step, parallel, or cross-session coding-agent work. (MANDATORY) ALWAYS use this skill before starting or resuming work (check `list`/`status`, verify assignment, start with `doing`), when adding dependencies or waiting for task states/events (`dep add` / `wait` / `watch-next`), when recording progress notes or blockers (`note` / `block`), when handing off or completing tasks (`handoff` / `done`), or when searching past task history (`search`).
 ---
 
 # Taskboard
 
-> CLI entrypoint: `python <skill_dir>/scripts/taskboard` (abbreviated as `taskboard` in examples below). Use `taskboard --board NAME <command>` to select a non-default Board; the global option goes before the command.
+> CLI entrypoint: `python <skill_dir>/scripts/taskboard` (abbreviated as `taskboard` below). The default Board is selected automatically; `--board NAME` is optional and only needed when working with a named Board. It is a global option and must appear before the subcommand.
 
 ## Task statuses
 
-- `READY`: no unfinished dependencies; available for Coordinator assignment or self-assignment with `taskboard doing`.
+- `READY`: no unfinished dependencies; available to be assigned or self-assigned with `taskboard doing`.
 - `IN_PROGRESS`: marked in progress via `taskboard doing`.
 - `WAITING`: has unfinished `depends_on` prerequisites; automatically becomes `READY` once all prerequisites are `DONE`.
 - `BLOCKED`: explicitly blocked via `taskboard block`; restore with `taskboard unblock`.
@@ -17,93 +17,76 @@ description: A shared task ledger for coordinating multi-step, parallel, or cros
 
 ## Core workflow
 
-1. **Inspect & search**: Run `taskboard --board BOARD list`, `taskboard --board BOARD status`, or `taskboard --board BOARD search` to check existing work; create a new task with `taskboard --board BOARD add "Short title" [--desc "Scope or context"] [--claim]`.
-2. **Take & record progress**: Start the assigned ready task with `taskboard --board BOARD doing TASK_ID`. If it has no assignee, `doing` atomically assigns it to the current Harness + Session and starts it. If it is assigned to another Session, the command refuses. Record concise progress summaries or key findings with `taskboard --board BOARD note TASK_ID "What was done"`; inspect them anytime via `taskboard --board BOARD show TASK_ID`.
+Use the default Board for ordinary task tracking. You do not need to specify a Board on every command.
+
+1. **Inspect & create**: Run `taskboard list`, `taskboard status`, or `taskboard search` to inspect existing work. Create a task with `taskboard add "Short title" [--desc "Scope or context"] [--self]`.
+2. **Start & record progress**: Start a ready task with `taskboard doing TASK_ID`. `doing` atomically assigns an unassigned task to the current Harness + Session and starts it. If it is assigned to another Session, the command refuses. Record progress with `taskboard note TASK_ID "What was done"`; inspect details with `taskboard show TASK_ID`.
 3. **Dependencies, task wait, and Board watch**:
-   - `taskboard --board BOARD dep add TASK_ID --needs OTHER_TASK_ID`: add a prerequisite dependency.
-   - `taskboard --board BOARD wait TASK_ID [--until done|doing|ready|waiting|blocked] [--timeout SECONDS]`: wait for one specific task to reach a state. The default target is `done`; already-satisfied conditions return immediately.
-   - `taskboard --board BOARD watch [--event task.created] [--timeout SECONDS]`: listen to events across the entire selected Board. `watch` has no task-ID or state-condition mode. Event watches start at invocation time; `--since CURSOR` resumes from a returned JSON cursor.
-   - `taskboard --board BOARD dep add TASK_ID --needs OTHER_TASK_ID --wait [--timeout SECONDS]` adds the dependency, then uses `wait OTHER_TASK_ID --until done`.
+   - `taskboard dep add TASK_ID --needs OTHER_TASK_ID`: add a prerequisite dependency.
+   - `taskboard wait TASK_ID [--until done|doing|ready|waiting|blocked] [--timeout SECONDS]`: wait for one task to reach a state. The default target is `done`; already-satisfied conditions return immediately.
+   - `taskboard watch-next [--event task.created] [--timeout SECONDS]`: listen to events across the selected Board. With no `--board`, this means the default Board. `watch-next` waits for one matching Board event and then exits; it has no task-ID or state-condition mode. Event watches start at invocation time; `--since CURSOR` resumes from a returned JSON cursor.
+   - `taskboard dep add TASK_ID --needs OTHER_TASK_ID --wait [--timeout SECONDS]`: add the dependency, then wait for the prerequisite to become done.
 4. **Block, finish & hand off**:
-   - Record a blocker: `taskboard --board BOARD block TASK_ID --reason "Reason"`; clear it with `taskboard --board BOARD unblock TASK_ID`.
-   - Complete a task: `taskboard --board BOARD done TASK_ID [--note "Summary"]`.
-   - Assign a task: `taskboard --board BOARD assign TASK_ID --claim`, or `taskboard --board BOARD assign TASK_ID --to REAL_SID --to-harness HARNESS`. Reassignment requires `--force`; use it only when acting as Coordinator.
-   - Clear an assignment: `taskboard --board BOARD unassign TASK_ID`; only the current assignee can do this without `--force`. The Coordinator may use `--force`. An in-progress task returns to `READY`/`WAITING`.
-   - Hand off a task: `taskboard --board BOARD handoff TASK_ID --to REAL_SID [--to-harness NAME] [--note "Handoff context"]`; this changes the assignee directly and returns it to `READY`/`WAITING` for the recipient.
+   - Record a blocker with `taskboard block TASK_ID --reason "Reason"`; clear it with `taskboard unblock TASK_ID`.
+   - Complete a task with `taskboard done TASK_ID [--note "Summary"]`.
+   - Assign a task with `taskboard assign TASK_ID --self`, or assign it to another session with `taskboard assign TASK_ID --to REAL_SID --to-harness HARNESS`. Reassignment requires `--force`.
+   - Clear an assignment with `taskboard unassign TASK_ID`. An in-progress task returns to `READY`/`WAITING`.
+   - Hand off a task with `taskboard handoff TASK_ID --to REAL_SID [--to-harness NAME] [--note "Handoff context"]`.
+
+For a named Board, add `--board NAME` before the subcommand, for example `taskboard --board frontend list`. Do this only when the task belongs to that named Board; otherwise omit it and use the default.
 
 ## Search syntax (`taskboard search`)
 
 Powered by zero-dependency multi-field BM25F scoring (`id` > `title` > `blocked_reason` > Markdown body > metadata), with automatic `camelCase`/`snake_case` splitting, CJK bigrams, and fuzzy fallback (`--exact` disables fuzzy matching):
 
-- **Boolean & phrases**: space-separated terms use `AND`; supports `OR`, quoted phrases `"exact match"`, and `-exclude` (e.g. `taskboard --board BOARD search oauth login -legacy`).
+- **Boolean & phrases**: space-separated terms use `AND`; supports `OR`, quoted phrases `"exact match"`, and `-exclude` (e.g. `taskboard search oauth login -legacy`). Add `--board NAME` before `search` only when searching a named Board.
 - **Inline filters**: `status:READY,IN_PROGRESS`, `harness:opencode`, `sid:xxx`, `task:t-xxxx`, `type:task|event`, `since:YYYY-MM-DD`, `before:YYYY-MM-DD` (usable with or without keywords).
 - **Flags**: `--tasks-only`, `--events-only`, `--status`, `--harness`, `--sid`, `--since`, `--limit N` (default `20`, `0` for all), `--json`.
 
-## Multi-agent coordination
+## Multi-agent patterns
 
-Replace `BOARD` with the Board name supplied by the Coordinator (or omit it only when using the project default). The global `--board` option must precede the subcommand.
+Taskboard is a shared task ledger, not an Agent runtime. It does not launch Agents or guarantee that a Session is alive. Choose the coordination pattern that fits the work; these are patterns, not mandatory Coordinator/Worker roles.
 
-Taskboard is the shared coordination ledger, not an Agent runtime. It does not launch Workers or guarantee that a Session is alive. It stores one current assignee per task and enforces assignment changes atomically under the Board lock. This is not a lease: assignments do not expire automatically when a Worker crashes. The Coordinator is responsible for assigning each task to one Worker and passing the exact Board and Task ID.
+### 1. Directed delegation
 
-### Coordinator
+One Agent (or a human) creates scoped tasks, optionally records dependencies, and assigns tasks to specific Sessions. The receiving Sessions use the task IDs to inspect and update their work. Use `assign`, `handoff`, and `wait` when explicit ownership and completion tracking matter.
 
-Before starting or delegating parallel work:
+### 2. Shared task pool
 
-1. Inspect the selected Board with `taskboard --board BOARD list` and `taskboard --board BOARD status`; search existing tasks before creating duplicates.
-2. Decompose the goal into independently verifiable tasks. Give each task a clear scope and acceptance criteria in `--desc`.
-3. Create tasks **before** starting Workers. For example, run `taskboard --board BOARD add "Implement login API" --desc "Acceptance criteria: ..."`; capture the returned TID. Optionally assign at creation with `--to REAL_SID --to-harness HARNESS`, or let the Coordinator assign later. Record dependencies with `taskboard --board BOARD dep add CHILD --needs PARENT`.
-4. Assign each task with `taskboard --board BOARD assign TID --to REAL_SID --to-harness HARNESS`, then pass the Worker the Board name and exact TID. Include the task description and relevant dependency context; do not ask Workers to recreate an already-created task.
-5. Track progress with `taskboard --board BOARD wait TID --until done`; use Board-level `watch` for new events. Inspect the task and its notes before accepting the result.
-6. Create follow-up tasks for newly discovered work rather than silently expanding another Worker’s assignment.
+Tasks are added to a common Board without pre-assigning every item. Available Agents inspect the Board and take suitable tasks with `doing` to atomically take an unassigned task, or explicitly use `assign TASK_ID --self` to claim it before starting. This is useful when the available Agents or their capacity are not known in advance.
 
-Example delegation brief:
+### 3. Event-driven intake / standing watcher
 
-```text
-Board: frontend
-Task ID: t-xxxxxxxx
-This task has already been created. Do not create a duplicate.
-Read it with `taskboard --board frontend show t-xxxxxxxx`, then follow this skill.
+An Agent can watch a Board for work that appears asynchronously: tasks added by a user, another Agent, or an external integration. Run `taskboard watch-next` without an event filter to observe all new Board events, or use `--event task.created` to focus on newly created tasks. When an event arrives, inspect the task and decide whether to take it, assign it, or leave it for another consumer. The watcher is not itself a scheduler and does not claim or execute tasks automatically.
+
+For supported Harnesses, run `watch-next` in the Harness's **background execution mode**, not as a foreground tool call that occupies the Agent. Retain the process/session handle and after the event is handled and the resulting work is finished, invoke `watch-next` again to wait for the next event. Do not leave it running as a permanent loop inside a single foreground Agent call. Do not assume shell `&` works in every Harness.
+
+Example (default Board):
+
+```bash
+taskboard watch-next --json
 ```
 
-### Worker
+Example (a named Board):
 
-When given a TID:
+```bash
+taskboard --board intake watch-next --event task.created --json
+```
 
-1. Use the specified Board explicitly and read the existing task with `taskboard --board BOARD show TID` before editing anything.
-2. Check its status and dependencies. If `WAITING`, block on `taskboard --board BOARD wait TID --until ready`; if `BLOCKED`, stop and report the blocker to the Coordinator. Do not start either state.
-3. Mark it `IN_PROGRESS` with `taskboard --board BOARD doing TID`, then record meaningful discoveries and progress with `taskboard --board BOARD note TID "..."`.
-4. If blocked, use `taskboard --board BOARD block TID --reason "..."` with a concrete reason. Do not leave a blocked task looking active.
-5. On completion, use `taskboard --board BOARD done TID --note "..."` with a concise summary and verification evidence.
-6. If ownership must move to another Session, use `taskboard --board BOARD handoff TID --to REAL_SID --note "..."` and include enough context for the receiver.
-
-Do not mark another Worker’s task done or modify unrelated tasks. If additional work is discovered, report it to the Coordinator or create a separately scoped task and link it with a dependency when appropriate. A `DONE` state records the Worker’s completion declaration; it is not independent Coordinator acceptance.
+A CLI `add` creates both the task Markdown and its `task_created` event, so no Markdown filesystem watcher is needed. External integrations should create tasks through the CLI (or otherwise emit compatible Board events) if they need to trigger a watcher; direct manual edits to task Markdown do not emit events. `watch-next` only reports one event per invocation. It does not launch Agents, monitor Session liveness, or automatically reassign abandoned work. Assignments do not expire; recovery from a crashed or unavailable assignee is an explicit reassignment decision.
 
 ### Board boundaries
 
 - Every task belongs to exactly one Board. Task IDs are scoped to that Board.
 - Dependencies are Board-local; use one Board for tasks that need dependency relationships.
-- Pass both Board name and TID when delegating. A bare TID is ambiguous when multiple Boards exist.
 - The default Board preserves the existing `.taskboard/tasks/` layout. Named Boards use `.taskboard/boards/NAME/`.
-
-### Background Board watcher and task pickup
-
-For the supported Harnesses listed below, **always run `taskboard watch` in the Harness's background execution mode**, never as a foreground tool call that occupies the Agent. Keep a Board watcher running for the Coordinator; when it exits after receiving an event, process the event and restart the watcher. Use the Harness's background-process/task facility, retain its process/session handle, and check that it is still alive. Do not assume that merely appending `&` works in every Harness.
-
-Example watcher command (run it through the Harness background facility):
-
-```bash
-taskboard --board BOARD watch --event task.created --json
-```
-
-The Coordinator consumes the returned event, reads the task with `show`, checks its status/dependencies, assigns it to a Worker with `assign`, then restarts the watcher. A CLI `add` creates both the task Markdown and its `task_created` event, so no Markdown filesystem watcher is needed. Direct manual edits to task Markdown do not emit events and therefore do not trigger automatic pickup; create dispatchable tasks through the CLI.
-
-`watch` only reports Board events. It does not launch Agents or monitor Worker liveness. Assignment is exclusive at the Taskboard data level: a task has one current assignee, and concurrent assignment attempts are serialized by the Board lock. There are no leases, heartbeats, or automatic reassignment after a Worker crashes; the Coordinator must explicitly reassign abandoned work with `assign --force`. `wait` is a foreground, task-specific state wait and is not the Board watcher.
+- `--board NAME` is optional. Omit it for the default Board; use it only when intentionally selecting a named Board. When sharing a task reference across Agents, include the Board name only if it is not the default Board.
 
 ## Automatic context board sync
 
-- Every task change (`add`, `assign`, `unassign`, `doing`, `done`, `block`, `unblock`, `dep add`, `handoff`) automatically updates the configured context files for the selected Board—no manual `taskboard sync` needed. The generated heading names the Board.
+- Every task change (`add`, `assign`, `unassign`, `doing`, `done`, `block`, `unblock`, `dep add`, `handoff`) automatically updates the configured context files for the selected Board—no manual `taskboard sync` needed. The generated heading names the Board. Commands without `--board` operate on the default Board.
 - Target files are configured as an array in `.taskboard/config.json (or global `scripts/config.json`)` under `context_file` (default `["AGENTS.md"]`, e.g. `["AGENTS.md", "CLAUDE.md"]`). Edits to `config.json` take effect immediately without re-running `init`; set `"auto_sync": false` or `"context_file": []` to disable.
-- Only the region between `<!-- TASKBOARD:START -->` and `<!-- TASKBOARD:END -->` is replaced, preserving all surrounding content. Use `taskboard --board BOARD sync --dry-run` or `taskboard --board BOARD context` to preview.
+- Only the region between `<!-- TASKBOARD:START -->` and `<!-- TASKBOARD:END -->` is replaced, preserving all surrounding content. Use `taskboard sync --dry-run` or `taskboard context` to preview the default Board; add `--board NAME` before the command to preview a named Board.
 
 ## Session identity
 

@@ -5,8 +5,8 @@ A lightweight, filesystem-native task board for coordinating multi-agent coding 
 一个基于本地文件系统的轻量多 Agent 共享任务看板，支持任务状态流转、条件与事件阻塞监听、纯标准库 BM25F 检索，以及多上下文文件（`AGENTS.md` / `CLAUDE.md` 等）自动同步。
 
 - **Markdown + YAML frontmatter** per task under the selected Board’s `tasks/` directory, paired with an append-only `events.jsonl` history.
-- **Explicit task assignment**: one current assignee per task; `assign --claim`, `add --claim`, and `doing` make assignment part of the normal workflow. Assignment writes are atomic under the Board lock.
-- **DAG dependencies, task wait & Board watch**: `wait` blocks on one task's state; `watch` listens for events across a Board.
+- **Explicit task assignment**: one current assignee per task; `assign --self` and `add --self` support explicit self-assignment; `doing` also atomically self-assigns an unassigned task when starting it. Assignment writes are atomic under the Board lock.
+- **DAG dependencies, task wait & Board watch**: `wait` blocks on one task's state; `watch-next` waits for the next event across a Board.
 - **BM25F multi-field search**: supports boolean queries, inline filters, camelCase/snake_case splitting, CJK bigrams, and fuzzy fallback.
 - **Automatic board sync**: refreshes configured context files on every task state change.
 
@@ -21,18 +21,18 @@ python .agents/skills/taskboard/scripts/taskboard init --context-file AGENTS.md
 Inside any supported Harness shell:
 
 ```bash
-taskboard add "Normalize URL identity" --desc "Align canonical host/path rules" --claim
+taskboard add "Normalize URL identity" --desc "Align canonical host/path rules" --self
 taskboard list
-taskboard --board default doing t-xxxxxxxx
-taskboard --board default note t-xxxxxxxx "Added host normalization tests"
+taskboard doing t-xxxxxxxx
+taskboard note t-xxxxxxxx "Added host normalization tests"
 taskboard status
-taskboard --board default done t-xxxxxxxx --note "All unit tests passing"
+taskboard done t-xxxxxxxx --note "All unit tests passing"
 ```
 
-`doing`, `note`, `done`, `block`, `handoff`, `assign`, and `unassign` automatically detect the active Harness and session ID. `doing` automatically assigns an unassigned task to the current session; it refuses to start a task assigned to another session. `--board NAME` must appear before the command. If auto-detection is unavailable, pass them explicitly:
+`doing`, `note`, `done`, `block`, `handoff`, `assign`, and `unassign` automatically detect the active Harness and session ID. `doing` atomically assigns an unassigned task to the current session and starts it. It refuses to start a task assigned to another session. `--board NAME` must appear before the command. If auto-detection is unavailable, pass them explicitly:
 
 ```bash
-taskboard --board default doing t-xxxxxxxx --harness codex --sid REAL_THREAD_ID
+taskboard doing t-xxxxxxxx --harness codex --sid REAL_THREAD_ID
 ```
 
 ## Supported Harnesses
@@ -69,10 +69,10 @@ Copy or symlink `skills/taskboard` into the skill directory for your Harness:
 ```text
 taskboard init [--context-file FILE ...]
 taskboard board create NAME | list | show NAME | use NAME | delete NAME [--force]
-taskboard [--board NAME] add TITLE [--desc TEXT] [--claim | --to SID --to-harness HARNESS]
+taskboard [--board NAME] add TITLE [--desc TEXT] [--self | --to SID --to-harness HARNESS]
 taskboard [--board NAME] list [--all]
 taskboard [--board NAME] show TASK_ID
-taskboard [--board NAME] assign TASK_ID (--claim | --to SID --to-harness HARNESS) [--force]
+taskboard [--board NAME] assign TASK_ID (--self | --to SID --to-harness HARNESS) [--force]
 taskboard [--board NAME] unassign TASK_ID [--force]
 taskboard [--board NAME] doing TASK_ID
 taskboard [--board NAME] note TASK_ID MESSAGE
@@ -81,7 +81,7 @@ taskboard [--board NAME] block TASK_ID --reason TEXT
 taskboard [--board NAME] unblock TASK_ID
 taskboard [--board NAME] dep add TASK_ID --needs OTHER_TASK_ID [--wait] [--timeout SECONDS]
 taskboard [--board NAME] wait TASK_ID [--until done|doing|ready|waiting|blocked] [--timeout SECONDS] [--json]
-taskboard [--board NAME] watch [--event TYPE] [--since CURSOR] [--timeout SECONDS] [--json]
+taskboard [--board NAME] watch-next [--event TYPE] [--since CURSOR] [--timeout SECONDS] [--json]
 taskboard [--board NAME] handoff TASK_ID --to REAL_SID [--to-harness NAME] [--note TEXT]
 taskboard [--board NAME] status
 taskboard [--board NAME] search [QUERY ...] [--status STATUS] [--harness NAME] [--sid SID] [--tasks-only | --events-only] [--since ISO_DATE] [--limit N] [--exact] [--json]
@@ -135,7 +135,7 @@ The project config is shared by all Boards. A named Board may optionally have it
 These commands have deliberately separate scopes:
 
 - `wait` observes **one task** and returns when its current state reaches the requested condition.
-- `watch` observes **the entire selected Board's event stream** and returns when a new event arrives. It does not accept task IDs or state conditions.
+- `watch-next` observes **the entire selected Board's event stream** and returns when a new event arrives. It does not accept task IDs or state conditions.
 
 ```bash
 # Wait for one task to finish (returns immediately if already DONE)
@@ -146,22 +146,22 @@ taskboard wait t-bbbbbbbb --until ready --timeout 120
 taskboard dep add t-bbbbbbbb --needs t-aaaaaaaa --wait
 
 # Listen for the next event anywhere on the selected Board
-taskboard --board frontend watch --event task.created --json
+taskboard --board frontend watch-next --event task.created --json
 
 # Resume from a previously returned event cursor
-taskboard --board frontend watch --since 1234 --json
+taskboard --board frontend watch-next --since 1234 --json
 ```
 
 - Both commands poll every 250 ms and release the Board lock between polls.
 - `wait` checks current state first, so already-satisfied conditions return immediately. It fails fast if the task or one of its prerequisites is blocked and the requested condition cannot be reached.
-- `watch` starts at the current event-log offset by default. `--json` returns a machine-readable event and byte-offset `cursor`; pass it to `--since CURSOR` to resume without replaying the matched event.
+- `watch-next` starts at the current event-log offset by default. `--json` returns a machine-readable event and byte-offset `cursor`; pass it to `--since CURSOR` to resume without replaying the matched event.
 - Dotted event names are accepted (`task.created` maps to the stored `task_created` type). `--timeout` is optional.
 
 ### Background watcher for Agent Harnesses
 
-In supported Harnesses, run `taskboard watch` using the Harness's **background execution mode**. Do not occupy the foreground Agent call with a long-running watcher. A Coordinator should retain and monitor the background process handle, consume the event when it exits, handle the task, then restart the watcher. The exact background mechanism is Harness-specific; do not assume shell `&` is sufficient.
+In supported Harnesses, run `taskboard watch-next` using the Harness's **background execution mode**. Do not occupy the foreground Agent call with a long-running watcher. The Agent should retain the background process handle, consume the event when it exits, handle the resulting work, and only after that work is finished invoke `watch-next` again to wait for the next event. The exact background mechanism is Harness-specific; do not assume shell `&` is sufficient.
 
-Tasks created with `taskboard add` automatically append a `task_created` event, so a Board watcher can detect CLI-created tasks and let a Coordinator pick them up. Manually editing a task Markdown file does not emit an event; use the CLI for tasks that should trigger automatic dispatch. `watch` only reports events: it does not launch Workers. The CLI enforces one current assignee per task through atomic Board-locked assignment updates; it does not monitor whether a session is alive or automatically recover abandoned assignments.
+Tasks created with `taskboard add` automatically append a `task_created` event, so a Board watcher can detect CLI-created tasks and let an Agent pick them up. Manually editing a task Markdown file does not emit an event; use the CLI for tasks that should trigger automatic dispatch. `watch-next` only reports one event per invocation: it does not launch Workers. The CLI enforces one current assignee per task through atomic Board-locked assignment updates; it does not monitor whether a session is alive or automatically recover abandoned assignments.
 
 ## Files and task statuses
 
@@ -187,7 +187,7 @@ Computed task statuses:
 - `WAITING`: has an unfinished dependency.
 - `READY`: available for assignment or self-assignment.
 
-An `assign` sets the task’s single current assignee without changing its state. `doing` assigns an unassigned task to the current session and starts it atomically; it refuses if another session is assigned. `handoff` changes the assignee to the recipient and returns the task to `READY` (or `WAITING` if dependencies remain). `unassign` clears the assignee and returns an in-progress task to `READY`/`WAITING`; only the current assignee may do this normally, while the Coordinator can use `--force`. Reassignment requires `--force`.
+An `assign` sets the task’s single current assignee without changing its state. `add --self` and `assign --self` explicitly assign a task to the current session. `doing` atomically assigns an unassigned task to the current session and starts it; it refuses if another session is assigned. If a task has an assignee, only that assignee may start or update it. `handoff` changes the assignee to the recipient and returns the task to `READY` (or `WAITING` if dependencies remain). `unassign` clears the assignee and returns an in-progress task to `READY`/`WAITING`; only the current assignee may do this normally, while the Coordinator can use `--force`. Reassignment requires `--force`.
 
 ## Configuration & automatic context sync
 
