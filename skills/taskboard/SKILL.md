@@ -1,6 +1,6 @@
 ---
 name: taskboard
-description: A shared task ledger for coordinating multi-step, parallel, or cross-session coding-agent work. (MANDATORY) ALWAYS use this skill before starting or resuming work (check `list`/`status`, verify assignment, start with `doing`), when adding dependencies or waiting for task states/events (`dep add` / `wait` / `watch-next`), when recording progress notes or blockers (`note` / `block`), when handing off or completing tasks (`handoff` / `done`), or when searching past task history (`search`).
+description: A task ledger for managing and tracing all work, from personal tasks to multi-agent and cross-session coding work. (MANDATORY) Every actionable task must be managed in Taskboard, even when there is only one person or one Agent. ALWAYS use this skill before creating, starting, resuming, changing, delegating, or completing a task; also use it for dependencies, waits, watches, notes, blockers, and task-history searches.
 ---
 
 # Taskboard
@@ -19,12 +19,18 @@ description: A shared task ledger for coordinating multi-step, parallel, or cros
 
 Use the default Board for ordinary task tracking. You do not need to specify a Board on every command.
 
-1. **Inspect & create**: Run `taskboard list`, `taskboard status`, or `taskboard search` to inspect existing work. Create a task with `taskboard add "Short title" [--desc "Scope or context"] [--self]`.
+## Taskboard is the task ledger and audit trail
+
+Taskboard is not only a multi-Agent coordination tool. It is the source of truth for **all actionable work**, including personal tasks, solo development, maintenance, research, and work performed by a single Agent. Every task must be created and tracked in Taskboard regardless of whether collaboration is involved. Do not leave actionable work only in chat messages, scratch notes, or an Agent's private plan.
+
+Create a task before starting the work, record meaningful progress and decisions with `note`, update its scope with `edit`, record blockers with `block`, and close it with `done` (or hand it off explicitly). This creates a durable history of what was planned, changed, blocked, delegated, and completed. Use dependencies when one task genuinely depends on another; do not manufacture dependencies for simple sequential steps.
+
+1. **Inspect & create**: Run `taskboard list`, `taskboard status`, or `taskboard search` to inspect existing work. Create a task with `taskboard add "Short title" [--desc "Scope or context"] [--self]`. Update its title and/or description later with `taskboard edit TASK_ID [--title "New title"] [--desc "New description"]`; omitted fields remain unchanged, and `--desc ""` clears the description.
 2. **Start & record progress**: Start a ready task with `taskboard doing TASK_ID`. `doing` atomically assigns an unassigned task to the current Harness + Session and starts it. If it is assigned to another Session, the command refuses. Record progress with `taskboard note TASK_ID "What was done"`; inspect details with `taskboard show TASK_ID`.
 3. **Dependencies, task wait, and Board watch**:
    - `taskboard dep add TASK_ID --needs OTHER_TASK_ID`: add a prerequisite dependency.
    - `taskboard wait TASK_ID [--until done|doing|ready|waiting|blocked] [--timeout SECONDS]`: wait for one task to reach a state. The default target is `done`; already-satisfied conditions return immediately.
-   - `taskboard watch-next [--event task.created] [--timeout SECONDS]`: listen to events across the selected Board. With no `--board`, this means the default Board. `watch-next` waits for one matching Board event and then exits; it has no task-ID or state-condition mode. Event watches start at invocation time; `--since CURSOR` resumes from a returned JSON cursor.
+   - `taskboard watch-next [--task TASK_ID] [--event task.updated] [--timeout SECONDS]`: listen across the selected Board, or restrict events to one task. Combine `--task` and `--event` to wait for a specific kind of change to a specific task. With no `--board`, this means the default Board. `watch-next` waits for one matching event and then exits. Event watches start at invocation time; `--since CURSOR` resumes from a returned JSON cursor.
    - `taskboard dep add TASK_ID --needs OTHER_TASK_ID --wait [--timeout SECONDS]`: add the dependency, then wait for the prerequisite to become done.
 4. **Block, finish & hand off**:
    - Record a blocker with `taskboard block TASK_ID --reason "Reason"`; clear it with `taskboard unblock TASK_ID`.
@@ -45,7 +51,7 @@ Powered by zero-dependency multi-field BM25F scoring (`id` > `title` > `blocked_
 
 ## Multi-agent patterns
 
-Taskboard is a shared task ledger, not an Agent runtime. It does not launch Agents or guarantee that a Session is alive. Choose the coordination pattern that fits the work; these are patterns, not mandatory Coordinator/Worker roles.
+Taskboard is a shared task ledger and audit trail, not an Agent runtime. It does not launch Agents or guarantee that a Session is alive. Choose the coordination pattern that fits the work; these are patterns, not mandatory Coordinator/Worker roles.
 
 ### 1. Directed delegation
 
@@ -73,18 +79,18 @@ Example (a named Board):
 taskboard --board intake watch-next --event task.created --json
 ```
 
-A CLI `add` creates both the task Markdown and its `task_created` event, so no Markdown filesystem watcher is needed. External integrations should create tasks through the CLI (or otherwise emit compatible Board events) if they need to trigger a watcher; direct manual edits to task Markdown do not emit events. `watch-next` only reports one event per invocation. It does not launch Agents, monitor Session liveness, or automatically reassign abandoned work. Assignments do not expire; recovery from a crashed or unavailable assignee is an explicit reassignment decision.
+A CLI `add` creates both the task Markdown and its `task_created` event, while `edit` emits `task_updated` with previous and new metadata values; use `watch-next --task TASK_ID --event task.updated` when you need to react to edits of one task. No Markdown filesystem watcher is needed. External integrations should create tasks through the CLI (or otherwise emit compatible Board events) if they need to trigger a watcher; direct manual edits to task Markdown do not emit events. `watch-next` only reports one event per invocation. It does not launch Agents, monitor Session liveness, or automatically reassign abandoned work. Assignments do not expire; recovery from a crashed or unavailable assignee is an explicit reassignment decision.
 
 ### Board boundaries
 
 - Every task belongs to exactly one Board. Task IDs are scoped to that Board.
 - Dependencies are Board-local; use one Board for tasks that need dependency relationships.
-- The default Board preserves the existing `.taskboard/tasks/` layout. Named Boards use `.taskboard/boards/NAME/`.
+- The default Board preserves the existing `.taskboard/tasks/` layout and cannot be renamed. Named Boards use `.taskboard/boards/NAME/`; rename one with `taskboard board rename OLD NEW`, which preserves its task IDs, dependencies, local config, and event history and updates the project default when necessary.
 - `--board NAME` is optional. Omit it for the default Board; use it only when intentionally selecting a named Board. When sharing a task reference across Agents, include the Board name only if it is not the default Board.
 
 ## Automatic context board sync
 
-- Every task change (`add`, `assign`, `unassign`, `doing`, `done`, `block`, `unblock`, `dep add`, `handoff`) automatically updates the configured context files for the selected Board—no manual `taskboard sync` needed. The generated heading names the Board. Commands without `--board` operate on the default Board.
+- Every task change (`add`, `edit`, `assign`, `unassign`, `doing`, `done`, `block`, `unblock`, `dep add`, `handoff`) automatically updates the configured context files for the selected Board—no manual `taskboard sync` needed. The generated heading names the Board. Commands without `--board` operate on the default Board.
 - Target files are configured as an array in `.taskboard/config.json (or global `scripts/config.json`)` under `context_file` (default `["AGENTS.md"]`, e.g. `["AGENTS.md", "CLAUDE.md"]`). Edits to `config.json` take effect immediately without re-running `init`; set `"auto_sync": false` or `"context_file": []` to disable.
 - Only the region between `<!-- TASKBOARD:START -->` and `<!-- TASKBOARD:END -->` is replaced, preserving all surrounding content. Use `taskboard sync --dry-run` or `taskboard context` to preview the default Board; add `--board NAME` before the command to preview a named Board.
 

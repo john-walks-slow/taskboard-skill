@@ -183,7 +183,7 @@ class TaskTest(unittest.TestCase):
    self.runcli(d,'doing',a,env={'PI_SESSION_ID':'pi-2'})
    self.runcli(d,'done',a,'--note','All tests passing',env={'PI_SESSION_ID':'pi-2'})
    shown=self.runcli(d,'show',a).stdout
-   self.assertIn('Notes:',shown)
+   self.assertIn('Description:',shown)
    self.assertIn('Support JWT and refresh tokens',shown)
    self.assertIn('Added JWT middleware',shown)
    self.assertIn('Need refresh token tests',shown)
@@ -195,7 +195,7 @@ class TaskTest(unittest.TestCase):
    e=os.environ.copy()
    for k in HARNESS_VARS:e.pop(k,None)
    p=subprocess.run([sys.executable,str(bin_cli),'--version'],cwd=d,env=e,text=True,capture_output=True)
-   self.assertEqual(p.returncode,0);self.assertIn('0.1.4',p.stdout)
+   self.assertEqual(p.returncode,0);self.assertIn('0.1.5',p.stdout)
    self.runcli(d,'init')
    a=self.runcli(d,'add','Task A').stdout.strip()
    b=self.runcli(d,'add','Task B').stdout.strip()
@@ -286,6 +286,66 @@ class TaskTest(unittest.TestCase):
    self.runcli(d,'board','use','default')
    self.runcli(d,'board','delete','frontend','--force')
    self.runcli(d,'board','list')
+ def test_edit_task_title_and_description_preserves_notes(self):
+  with tempfile.TemporaryDirectory() as d:
+   self.runcli(d,'init')
+   tid=self.runcli(d,'add','Old title','--desc','Old description').stdout.strip()
+   self.runcli(d,'note',tid,'A progress note',env={'PI_SESSION_ID':'editor'})
+   self.runcli(d,'edit',tid,'--title','New title','--desc','New description')
+   shown=self.runcli(d,'show',tid).stdout
+   self.assertIn('New title',shown)
+   self.assertIn('Description:\nNew description',shown)
+   self.assertIn('A progress note',shown)
+   self.assertNotIn('Old description',shown)
+   update_event=next(json.loads(line) for line in (Path(d)/'.taskboard'/'events.jsonl').read_text().splitlines() if json.loads(line).get('type')=='task_updated')
+   self.assertEqual(update_event['previous'],{'title':'Old title','desc':'Old description'})
+   self.assertIn('New title',(Path(d)/'AGENTS.md').read_text())
+   self.assertIn(tid,self.runcli(d,'search','New description','--tasks-only').stdout)
+   self.runcli(d,'edit',tid,'--desc','')
+   self.assertNotIn('New description',self.runcli(d,'show',tid).stdout)
+   self.runcli(d,'edit',tid,ok=False)
+   self.runcli(d,'edit',tid,'--title','   ',ok=False)
+
+ def test_edit_migrates_legacy_description_without_losing_notes(self):
+  with tempfile.TemporaryDirectory() as d:
+   self.runcli(d,'init')
+   tid=self.runcli(d,'add','Legacy task','--desc','Original legacy description').stdout.strip()
+   task_path=Path(d)/'.taskboard'/'tasks'/(tid+'.md')
+   raw=task_path.read_text(encoding='utf-8')
+   raw=raw.replace('description: \"Original legacy description\"\n','')
+   raw=raw.replace('\n---\n\n','\n---\n\nOriginal legacy description\n')
+   task_path.write_text(raw,encoding='utf-8')
+   self.runcli(d,'note',tid,'Keep this note',env={'PI_SESSION_ID':'legacy-editor'})
+   self.runcli(d,'edit',tid,'--desc','Updated description')
+   shown=self.runcli(d,'show',tid).stdout
+   self.assertIn('Description:\nUpdated description',shown)
+   self.assertIn('Keep this note',shown)
+   self.assertNotIn('Original legacy description',shown)
+
+ def test_board_rename_preserves_data_and_updates_default(self):
+  with tempfile.TemporaryDirectory() as d:
+   self.runcli(d,'init')
+   self.runcli(d,'board','create','old-board')
+   tid=self.runcli(d,'--board','old-board','add','Keep me').stdout.strip()
+   events_path=Path(d)/'.taskboard'/'boards'/'old-board'/'events.jsonl'
+   before_events=events_path.read_text()
+   self.runcli(d,'board','use','old-board')
+   self.runcli(d,'board','rename','old-board','new-board')
+   self.assertFalse((Path(d)/'.taskboard'/'boards'/'old-board').exists())
+   self.assertIn(tid,self.runcli(d,'list').stdout)
+   self.assertIn(tid,self.runcli(d,'--board','new-board','list').stdout)
+   config=json.loads((Path(d)/'.taskboard'/'config.json').read_text())
+   self.assertEqual(config['default_board'],'new-board')
+   self.assertIn('## Shared Task Board: new-board',(Path(d)/'AGENTS.md').read_text())
+   moved_events=(Path(d)/'.taskboard'/'boards'/'new-board'/'events.jsonl').read_text()
+   self.assertTrue(moved_events.startswith(before_events))
+   self.assertIn('board_renamed',moved_events)
+   self.runcli(d,'board','rename','default','x',ok=False)
+   self.runcli(d,'board','rename','new-board','default',ok=False)
+   self.runcli(d,'board','create','other')
+   self.runcli(d,'board','rename','new-board','other',ok=False)
+   self.runcli(d,'board','rename','new-board','renamed')
+
  def test_watch_event_and_cursor(self):
   with tempfile.TemporaryDirectory() as d:
    self.runcli(d,'init')
@@ -310,6 +370,25 @@ class TaskTest(unittest.TestCase):
    th.join()
    self.assertEqual(board_event['event']['type'],'task_created')
    self.assertIn('DONE:',self.runcli(d,'done',tid,'--harness','pi','--sid','watcher').stdout.replace('Completed','DONE:'))
+ def test_watch_specific_task_updates(self):
+  with tempfile.TemporaryDirectory() as d:
+   self.runcli(d,'init')
+   target=self.runcli(d,'add','Target task').stdout.strip()
+   other=self.runcli(d,'add','Unrelated task').stdout.strip()
+   self.runcli(d,'watch-next','--task','missing-task',ok=False)
+   def make_changes():
+    time.sleep(0.2)
+    self.runcli(d,'note',other,'unrelated change',env={'PI_SESSION_ID':'watcher'})
+    time.sleep(0.2)
+    self.runcli(d,'edit',target,'--desc','Target description changed')
+   th=threading.Thread(target=make_changes); th.start()
+   result=json.loads(self.runcli(d,'watch-next','--task',target,'--event','task.updated','--timeout','3','--json').stdout)
+   th.join()
+   self.assertEqual(result['event']['type'],'task_updated')
+   self.assertEqual(result['event']['task'],target)
+   self.assertEqual(result['event']['desc'],'Target description changed')
+   self.assertEqual(result['event']['previous']['desc'],'')
+
  def test_assignment_self_add_doing_handoff_and_reassignment(self):
   with tempfile.TemporaryDirectory() as d:
    self.runcli(d,'init')
@@ -356,7 +435,7 @@ class TaskTest(unittest.TestCase):
    self.assertIn('READY',shown); self.assertIn('Assignee: unassigned',shown)
  def test_version_and_no_lifecycle_commands(self):
   with tempfile.TemporaryDirectory() as d:
-   self.assertIn('0.1.4',self.runcli(d,'--version').stdout)
+   self.assertIn('0.1.5',self.runcli(d,'--version').stdout)
    self.runcli(d,'init')
    for cmd in ('start','stop','start-session','conclude-session'):
     self.runcli(d,cmd,ok=False)
