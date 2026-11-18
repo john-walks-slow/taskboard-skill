@@ -5,7 +5,19 @@ description: A task ledger for managing and tracing all work, from personal task
 
 # Taskboard
 
-> CLI entrypoint: `python <skill_dir>/scripts/taskboard` (abbreviated as `taskboard` below). The default Board is selected automatically; `--board NAME` is optional and only needed when working with a named Board. It is a global option and must appear before the subcommand.
+> CLI entrypoint: `taskboard` (installed as a user-level executable in `~/.local/bin`). The Skill is assumed to be globally installed already; the CLI must also be linked into a directory on `PATH`. The default Board is selected automatically; `--board NAME` is optional and only needed when working with a named Board. It is a global option and must appear before the subcommand.
+
+## CLI availability
+
+Before using Taskboard, verify that `taskboard` is available with `command -v taskboard`. If it is not, install a symlink to this Skill's `scripts/taskboard` executable in `~/.local/bin` (replace `<skill_dir>` with the actual directory containing this `SKILL.md`):
+
+```bash
+TASKBOARD_SKILL_DIR="/absolute/path/to/taskboard" # directory containing this SKILL.md
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$TASKBOARD_SKILL_DIR/scripts/taskboard" "$HOME/.local/bin/taskboard"
+```
+
+Ensure `~/.local/bin` is on `PATH` in the Harness environment. Then verify with `taskboard --version`. Do not invoke the script through Python or repeat the Skill's filesystem path for normal commands. The symlink follows Skill updates; recreate it if the Skill directory moves.
 
 ## Task statuses
 
@@ -90,9 +102,9 @@ A CLI `add` creates both the task Markdown and its `task_created` event, while `
 
 ## Automatic context board sync
 
-- Every task change (`add`, `edit`, `assign`, `unassign`, `doing`, `done`, `block`, `unblock`, `dep add`, `handoff`) automatically updates the configured context files for the selected Board—no manual `taskboard sync` needed. The generated heading names the Board. Commands without `--board` operate on the default Board.
+- Every task change (`add`, `edit`, `assign`, `unassign`, `doing`, `done`, `block`, `unblock`, `dep add`, `handoff`) automatically updates the configured context files with an aggregate view of **all Boards**, regardless of which Board the command targets. Tasks are grouped together by status and tagged with their Board name; Recent Activity is merged across Boards and includes timestamps and task titles.
 - Target files are configured as an array in `.taskboard/config.json (or global `scripts/config.json`)` under `context_file` (default `["AGENTS.md"]`, e.g. `["AGENTS.md", "CLAUDE.md"]`). Edits to `config.json` take effect immediately without re-running `init`; set `"auto_sync": false` or `"context_file": []` to disable.
-- Only the region between `<!-- TASKBOARD:START -->` and `<!-- TASKBOARD:END -->` is replaced, preserving all surrounding content. Use `taskboard sync --dry-run` or `taskboard context` to preview the default Board; add `--board NAME` before the command to preview a named Board.
+- Only the region between `<!-- TASKBOARD:START -->` and `<!-- TASKBOARD:END -->` is replaced, preserving all surrounding content. Use `taskboard sync --dry-run` or `taskboard context` to preview the aggregate project-wide view; `--board` does not narrow context sync.
 
 ## Session identity
 

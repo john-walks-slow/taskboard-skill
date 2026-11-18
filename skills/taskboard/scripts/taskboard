@@ -3,7 +3,7 @@
 import argparse, collections, contextlib, datetime as dt, difflib, json, math, os, re, shlex, sys, tempfile, time
 from pathlib import Path
 
-VERSION = '0.1.5'
+VERSION = '0.1.6'
 BOARD = 'default'
 START, END = '<!-- TASKBOARD:START -->', '<!-- TASKBOARD:END -->'
 DEFAULT_ENV = {
@@ -157,8 +157,8 @@ def cfg(root=None):
         if BOARD!='default' and P(root)['config'].exists():
             c=merge_cfg(c,json.loads(P(root)['config'].read_text(encoding='utf-8')))
     return c
-def events(root):
-    p=P(root)['events']
+def events(root, board=None):
+    p=P(root,board)['events']
     if not p.exists(): return []
     out=[]
     for line in p.read_text(encoding='utf-8').splitlines():
@@ -171,9 +171,9 @@ def log(root, kind, **kw):
 def task_path(root, tid):
     if not re.fullmatch(r'[A-Za-z0-9_-]+',tid): raise ValueError('invalid task ID')
     return P(root)['tasks']/(tid+'.md')
-def read_tasks(root):
+def read_tasks(root, board=None):
     out={}
-    for f in P(root)['tasks'].glob('*.md'):
+    for f in P(root,board)['tasks'].glob('*.md'):
         t=read_md(f); out[t['id']]=t
     return out
 def save_task(root,t): atomic(task_path(root,t['id']),frontmatter({k:v for k,v in t.items() if not k.startswith('_')},t.get('_body','')))
@@ -604,30 +604,70 @@ def context_targets(c):
     raw=c.get('context_file',['AGENTS.md'])
     if isinstance(raw,str): return [raw] if raw else []
     return [x for x in (raw or []) if x]
+def format_activity_time(value):
+    if not value: return 'unknown time'
+    try:
+        parsed=dt.datetime.fromisoformat(value.replace('Z','+00:00'))
+        if parsed.tzinfo is None: parsed=parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed.astimezone().strftime('%Y-%m-%d %H:%M:%S')
+    except (TypeError,ValueError): return str(value)
+
+def activity_sort_key(item):
+    value=item[0].get('at','')
+    try:
+        parsed=dt.datetime.fromisoformat(value.replace('Z','+00:00'))
+        if parsed.tzinfo is None: parsed=parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed.timestamp()
+    except (TypeError,ValueError): return 0
+
 def sync(root,dry=False,quiet=False):
     c=cfg(root); targets=context_targets(c)
     if not targets:
         if not quiet:print('No context_file configured.')
         return
-    ts=read_tasks(root); limit=int(c.get('max_context_tasks',30))
-    board_heading='## Shared Task Board' if BOARD=='default' else f'## Shared Task Board: {BOARD}'
-    lines=[START,board_heading,'','> **Mandatory:** ALWAYS load and follow the `taskboard` skill before starting any work in this repository.']
+    limit=int(c.get('max_context_tasks',30))
+    # Context files are a project-wide view: aggregate every Board regardless of
+    # which Board the triggering CLI command selected.
+    tasks_by_board={}; all_tasks=[]; all_events=[]
+    for board in board_names(root):
+        board_tasks=read_tasks(root,board); board_events=events(root,board)
+        tasks_by_board[board]=board_tasks
+        for task in board_tasks.values(): all_tasks.append((board,task,board_tasks))
+        for event in board_events: all_events.append((event,board))
+    lines=[START,'## Shared Task Board','','> **Mandatory:** ALWAYS load and follow the `taskboard` skill before starting any work in this repository.']
     for heading,st in [('In Progress','IN_PROGRESS'),('Ready Tasks','READY'),('Waiting','WAITING'),('Blocked','BLOCKED')]:
-        lines.extend(['',f'### {heading}']); group=[t for t in ts.values() if status(t,ts)==st]
-        for t in sorted(group,key=lambda x:x.get('created_at',''))[:limit]:
+        group=[item for item in all_tasks if status(item[1],item[2])==st]
+        if st=='IN_PROGRESS': group.sort(key=lambda item:item[1].get('updated_at',''),reverse=True)
+        else: group.sort(key=lambda item:item[1].get('created_at',''))
+        lines.extend(['',f'### {heading}'])
+        for board,t,board_tasks in group[:limit]:
             extra=''
-            if st=='WAITING':extra=' (waiting for '+', '.join(d for d in t.get('depends_on',[]) if d in ts and ts[d].get('state')!='done')+')'
-            if st=='BLOCKED' and t.get('blocked_reason'):extra=': '+t['blocked_reason']
-            lines.append(f"- `{t['id']}` {t['title']}{extra}{assignee_label(t)}")
-        if not group:lines.append('- None')
-    recent=[e for e in events(root) if e.get('type') in ('task_handoff','task_assigned','task_unassigned','task_done','task_started','task_claimed')][-int(c.get('max_recent_events',8)):]
+            if st=='WAITING':
+                pending=[d for d in t.get('depends_on',[]) if d in board_tasks and board_tasks[d].get('state')!='done']
+                if pending: extra=' (waiting for '+', '.join(f'{board}:{d}' for d in pending)+')'
+            if st=='BLOCKED' and t.get('blocked_reason'): extra=': '+t['blocked_reason']
+            lines.append(f"- `[{board}]` `{t['id']}` {t['title']}{extra}{assignee_label(t)}")
+        if not group: lines.append('- None')
+    activity_types={'task_created','task_updated','task_handoff','task_assigned','task_unassigned','task_done','task_started','task_claimed','task_blocked','task_unblocked','task_noted','dependency_added'}
+    recent=sorted(((e,board) for e,board in all_events if e.get('type') in activity_types),key=activity_sort_key,reverse=True)[:int(c.get('max_recent_events',8))]
     lines.extend(['','### Recent Activity'])
-    for e in reversed(recent):
-        if e['type']=='task_handoff': msg=f"`{e['task']}` handed off: `{e.get('from_sid','?')}` → `{e.get('to_sid','?')}`"
-        elif e['type']=='task_assigned': msg=f"`{e['task']}` assigned to `{e.get('assignee',{}).get('harness','')}:{e.get('assignee',{}).get('sid','')}`"
-        elif e['type']=='task_unassigned': msg=f"`{e['task']}` unassigned"
-        else: msg=f"`{e['task']}` {('completed' if e['type']=='task_done' else 'started')} by `{e.get('sid','')}`"
-        lines.append('- '+msg)
+    for e,board in recent:
+        tid=e.get('task','?')
+        title=tasks_by_board.get(board,{}).get(tid,{}).get('title') or e.get('title') or tid
+        kind=e.get('type','')
+        if kind=='task_handoff': detail=f"handed off: `{e.get('from_harness','?')}:{e.get('from_sid','?')}` → `{e.get('to_harness','?')}:{e.get('to_sid','?')}`"
+        elif kind=='task_assigned':
+            target=e.get('assignee') or {}; detail=f"assigned to `{target.get('harness','')}:{target.get('sid','')}`"
+        elif kind=='task_unassigned': detail='unassigned'
+        elif kind=='task_done': detail=f"completed by `{e.get('harness','')}:{e.get('sid','')}`"
+        elif kind in ('task_started','task_claimed'): detail=f"started by `{e.get('harness','')}:{e.get('sid','')}`"
+        elif kind=='task_blocked': detail='blocked'+(f": {e['reason']}" if e.get('reason') else '')
+        elif kind=='task_unblocked': detail='unblocked'
+        elif kind=='task_noted': detail='note added'
+        elif kind=='task_updated': detail='updated'
+        elif kind=='dependency_added': detail=f"dependency added (needs `{board}:{e.get('needs','?')}`)"
+        else: detail='created'
+        lines.append(f"- `{format_activity_time(e.get('at'))}` `[{board}]` **{title}** (`{tid}`) {detail}")
     lines.append(END); generated='\n'.join(lines); updated=0
     for rel in targets:
         target=(root/rel).resolve()

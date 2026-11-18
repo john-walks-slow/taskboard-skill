@@ -195,7 +195,7 @@ class TaskTest(unittest.TestCase):
    e=os.environ.copy()
    for k in HARNESS_VARS:e.pop(k,None)
    p=subprocess.run([sys.executable,str(bin_cli),'--version'],cwd=d,env=e,text=True,capture_output=True)
-   self.assertEqual(p.returncode,0);self.assertIn('0.1.5',p.stdout)
+   self.assertEqual(p.returncode,0);self.assertIn('0.1.6',p.stdout)
    self.runcli(d,'init')
    a=self.runcli(d,'add','Task A').stdout.strip()
    b=self.runcli(d,'add','Task B').stdout.strip()
@@ -276,7 +276,8 @@ class TaskTest(unittest.TestCase):
    self.assertIn(default_task,self.runcli(d,'list').stdout)
    self.assertNotIn(front_task,self.runcli(d,'list').stdout)
    self.assertIn(front_task,self.runcli(d,'--board','frontend','list').stdout)
-   self.assertIn('## Shared Task Board: frontend',(Path(d)/'AGENTS.md').read_text())
+   self.assertIn('`[default]`', (Path(d)/'AGENTS.md').read_text())
+   self.assertIn('`[frontend]`', (Path(d)/'AGENTS.md').read_text())
    self.runcli(d,'--board','frontend','dep','add',front_task,'--needs',default_task,ok=False)
    self.runcli(d,'board','use','frontend')
    self.assertIn(front_task,self.runcli(d,'list').stdout)
@@ -286,6 +287,29 @@ class TaskTest(unittest.TestCase):
    self.runcli(d,'board','use','default')
    self.runcli(d,'board','delete','frontend','--force')
    self.runcli(d,'board','list')
+ def test_sync_aggregates_all_boards_and_enriches_recent_activity(self):
+  with tempfile.TemporaryDirectory() as d:
+   self.runcli(d,'init')
+   default_id=self.runcli(d,'add','Default implementation').stdout.strip()
+   self.runcli(d,'doing',default_id,env={'PI_SESSION_ID':'pi-default'})
+   self.runcli(d,'board','create','frontend')
+   front_id=self.runcli(d,'--board','frontend','add','Frontend redesign').stdout.strip()
+   self.runcli(d,'--board','frontend','doing',front_id,env={'OPENCODE_SESSION_ID':'oc-front'})
+   self.runcli(d,'--board','frontend','sync')
+   content=(Path(d)/'AGENTS.md').read_text()
+   self.assertIn(f'`[default]` `{default_id}` Default implementation',content)
+   self.assertIn(f'`[frontend]` `{front_id}` Frontend redesign',content)
+   self.assertIn('### Recent Activity',content)
+   self.assertIn('**Default implementation**',content)
+   self.assertIn('**Frontend redesign**',content)
+   self.assertRegex(content,r'- `20\d{2}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}`')
+   recent=content.split('### Recent Activity',1)[1]
+   self.assertIn('**Frontend redesign**',recent)
+   self.assertIn('**Default implementation**',recent)
+   self.assertIn('pi:pi-default',content)
+   self.assertIn('opencode:oc-front',content)
+   self.assertEqual(content.count('## Shared Task Board'),1)
+
  def test_edit_task_title_and_description_preserves_notes(self):
   with tempfile.TemporaryDirectory() as d:
    self.runcli(d,'init')
@@ -336,7 +360,7 @@ class TaskTest(unittest.TestCase):
    self.assertIn(tid,self.runcli(d,'--board','new-board','list').stdout)
    config=json.loads((Path(d)/'.taskboard'/'config.json').read_text())
    self.assertEqual(config['default_board'],'new-board')
-   self.assertIn('## Shared Task Board: new-board',(Path(d)/'AGENTS.md').read_text())
+   self.assertIn('`[new-board]`', (Path(d)/'AGENTS.md').read_text())
    moved_events=(Path(d)/'.taskboard'/'boards'/'new-board'/'events.jsonl').read_text()
    self.assertTrue(moved_events.startswith(before_events))
    self.assertIn('board_renamed',moved_events)
@@ -435,7 +459,7 @@ class TaskTest(unittest.TestCase):
    self.assertIn('READY',shown); self.assertIn('Assignee: unassigned',shown)
  def test_version_and_no_lifecycle_commands(self):
   with tempfile.TemporaryDirectory() as d:
-   self.assertIn('0.1.5',self.runcli(d,'--version').stdout)
+   self.assertIn('0.1.6',self.runcli(d,'--version').stdout)
    self.runcli(d,'init')
    for cmd in ('start','stop','start-session','conclude-session'):
     self.runcli(d,cmd,ok=False)

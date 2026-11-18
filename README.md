@@ -10,12 +10,37 @@ A lightweight, filesystem-native task ledger for managing and tracing all work, 
 - **BM25F multi-field search**: supports boolean queries, inline filters, camelCase/snake_case splitting, CJK bigrams, and fuzzy fallback.
 - **Automatic board sync**: refreshes configured context files on every task state change.
 
+## Install the CLI once
+
+The Taskboard Skill and the `taskboard` CLI are separate: installing the Skill does not automatically put the command on your shell `PATH`. Link the executable from your globally installed Skill into `~/.local/bin` once. Choose the Skill directory that matches your Harness from the table below:
+
+```bash
+TASKBOARD_SKILL_DIR="$HOME/.agents/skills/taskboard" # change this to your global Skill path
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$TASKBOARD_SKILL_DIR/scripts/taskboard" "$HOME/.local/bin/taskboard"
+```
+
+Ensure `~/.local/bin` is on `PATH` (add this to your shell profile if needed):
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Verify the installation:
+
+```bash
+command -v taskboard
+taskboard --version
+```
+
+The link points directly to the Skill's executable, so updating the Skill also updates the CLI. Re-run the link command if you move the Skill directory.
+
 ## Quick start
 
 Initialize once from the project root:
 
 ```bash
-python .agents/skills/taskboard/scripts/taskboard init --context-file AGENTS.md
+taskboard init --context-file AGENTS.md
 ```
 
 Inside any supported Harness shell:
@@ -54,7 +79,7 @@ taskboard doing t-xxxxxxxx --harness codex --sid REAL_THREAD_ID
 
 ## Skill installation paths
 
-Copy or symlink `skills/taskboard` into the skill directory for your Harness:
+Copy or symlink `skills/taskboard` into the global Skill directory for your Harness. Use that same directory as `TASKBOARD_SKILL_DIR` in the CLI installation step above:
 
 | Harness | Project path | User / global path |
 |---|---|---|
@@ -134,7 +159,7 @@ taskboard board rename frontend web
 
 `board rename OLD NEW` renames a named Board directory while preserving its tasks, dependencies, local config, and event history; it also updates the project default if that Board was selected. The `default` Board cannot be renamed.
 
-The project config is shared by all Boards. A named Board may optionally have its own `config.json` overrides. Automatic context sync reflects the Board selected for the command; it does not merge task summaries from every Board.
+The project config is shared by all Boards. A named Board may optionally have its own `config.json` overrides. Automatic context sync aggregates tasks and recent activity from every Board into one project-wide view, regardless of which Board the command targets. Tasks are grouped by status and tagged with their Board name; Recent Activity is merged chronologically and includes timestamps and task titles.
 
 ## Task wait and Board watch
 
@@ -200,10 +225,10 @@ An `assign` sets the task’s single current assignee without changing its state
 
 ## Configuration & automatic context sync
 
-Every task change (`add`, `assign`, `unassign`, `doing`, `done`, `block`, `unblock`, `note`, `dep add`, `handoff`) automatically updates the configured context files between `<!-- TASKBOARD:START -->` and `<!-- TASKBOARD:END -->`, preserving all surrounding content.
+Every task change (`add`, `edit`, `assign`, `unassign`, `doing`, `done`, `block`, `unblock`, `note`, `dep add`, `handoff`) automatically updates the configured context files between `<!-- TASKBOARD:START -->` and `<!-- TASKBOARD:END -->`, preserving all surrounding content. The generated section aggregates all Boards into shared status groups, labels each task with its Board, and merges Recent Activity across Boards with timestamps and task titles.
 
 Configuration is loaded in three layers (project overrides global, optional Board config overrides project; `harness_env` maps are merged):
-- **Global**: `skills/taskboard/scripts/config.json`
+- **Global**: `config.json` next to the globally installed Skill executable (`skills/taskboard/scripts/config.json` in a repository checkout)
 - **Project**: `.taskboard/config.json`
 
 ```json
