@@ -12,18 +12,12 @@ A lightweight, filesystem-native task ledger for managing and tracing all work, 
 
 ## Install the CLI once
 
-The Taskboard Skill and the `taskboard` CLI are separate: installing the Skill does not automatically put the command on your shell `PATH`. Link the executable from your globally installed Skill into `~/.local/bin` once. Choose the Skill directory that matches your Harness from the table below:
+Link the executable from your globally installed Skill into `~/.local/bin` once.
 
 ```bash
 TASKBOARD_SKILL_DIR="$HOME/.agents/skills/taskboard" # change this to your global Skill path
 mkdir -p "$HOME/.local/bin"
 ln -sfn "$TASKBOARD_SKILL_DIR/scripts/taskboard" "$HOME/.local/bin/taskboard"
-```
-
-Ensure `~/.local/bin` is on `PATH` (add this to your shell profile if needed):
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Verify the installation:
@@ -32,8 +26,6 @@ Verify the installation:
 command -v taskboard
 taskboard --version
 ```
-
-The link points directly to the Skill's executable, so updating the Skill also updates the CLI. Re-run the link command if you move the Skill directory.
 
 ## Quick start
 
@@ -76,18 +68,6 @@ taskboard doing t-xxxxxxxx --harness codex --sid REAL_THREAD_ID
 | Qoder | `QODER_SESSION_ID` |
 | Cursor | `CURSOR_SESSION_ID`, `CURSOR_TRACE_ID` |
 | Kiro | `KIRO_SESSION_ID` |
-
-## Skill installation paths
-
-Copy or symlink `skills/taskboard` into the global Skill directory for your Harness. Use that same directory as `TASKBOARD_SKILL_DIR` in the CLI installation step above:
-
-| Harness | Project path | User / global path |
-|---|---|---|
-| Codex / DeepSeek Harness | `.agents/skills/taskboard` | `~/.agents/skills/taskboard` |
-| Claude Code | `.claude/skills/taskboard` | `~/.claude/skills/taskboard` |
-| OpenCode | `.opencode/skills/taskboard` | `~/.config/opencode/skills/taskboard` |
-| Pi | `.pi/skills/taskboard` | `~/.pi/agent/skills/taskboard` |
-| Antigravity | `.agents/skills/taskboard` | `~/.gemini/antigravity/skills/taskboard` |
 
 ## Commands
 
