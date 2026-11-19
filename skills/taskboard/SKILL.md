@@ -5,19 +5,7 @@ description: A task ledger for managing and tracing all work, from personal task
 
 # Taskboard
 
-> CLI entrypoint: `taskboard` (installed as a user-level executable in `~/.local/bin`). The Skill is assumed to be globally installed already; the CLI must also be linked into a directory on `PATH`. The default Board is selected automatically; `--board NAME` is optional and only needed when working with a named Board. It is a global option and must appear before the subcommand.
-
-## CLI availability
-
-Before using Taskboard, verify that `taskboard` is available with `command -v taskboard`. If it is not, install a symlink to this Skill's `scripts/taskboard` executable in `~/.local/bin` (replace `<skill_dir>` with the actual directory containing this `SKILL.md`):
-
-```bash
-TASKBOARD_SKILL_DIR="/absolute/path/to/taskboard" # directory containing this SKILL.md
-mkdir -p "$HOME/.local/bin"
-ln -sfn "$TASKBOARD_SKILL_DIR/scripts/taskboard" "$HOME/.local/bin/taskboard"
-```
-
-Ensure `~/.local/bin` is on `PATH` in the Harness environment. Then verify with `taskboard --version`. Do not invoke the script through Python or repeat the Skill's filesystem path for normal commands. The symlink follows Skill updates; recreate it if the Skill directory moves.
+> CLI entrypoint: `taskboard`. Assume the CLI is installed and available on `PATH`. If it is not, the executable is `scripts/taskboard` relative to this `SKILL.md`; resolve the Skill directory and invoke that executable directly or make it available using the environment's normal conventions. Do not assume a particular global installation path. The default Board is selected automatically; `--board NAME` is optional and only needed when working with a named Board. It is a global option and must appear before the subcommand.
 
 ## Task statuses
 
