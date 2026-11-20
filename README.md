@@ -52,23 +52,6 @@ taskboard done t-xxxxxxxx --note "All unit tests passing"
 taskboard doing t-xxxxxxxx --harness codex --sid REAL_THREAD_ID
 ```
 
-## Supported Harnesses
-
-| Harness | Environment variable(s) |
-|---|---|
-| Codex | `CODEX_THREAD_ID` |
-| Claude Code | `CLAUDE_CODE_SESSION_ID` |
-| OpenCode | `OPENCODE_SESSION_ID` |
-| DeepSeek Harness (`dsh`) | `DSH_SESSION_ID` |
-| Pi (`pi-coding-agent`) | `PI_SESSION_ID` |
-| Antigravity (`agy`) / Gemini CLI | `ANTIGRAVITY_SESSION_ID`, `GEMINI_SESSION_ID` |
-| Hermes Agent | `HERMES_SESSION_ID` |
-| Goose | `GOOSE_SESSION_ID` |
-| OpenClaw | `OPENCLAW_SESSION_ID`, `OPENCLAW_SESSION_KEY` |
-| Qoder | `QODER_SESSION_ID` |
-| Cursor | `CURSOR_SESSION_ID`, `CURSOR_TRACE_ID` |
-| Kiro | `KIRO_SESSION_ID` |
-
 ## Commands
 
 ```text
@@ -222,6 +205,23 @@ Configuration is loaded in three layers (project overrides global, optional Boar
 ```
 
 Set `"auto_sync": false` or `"context_file": []` to disable automatic sync. `TASKBOARD_HARNESS` and `TASKBOARD_SID` can also provide identity explicitly via environment variables.
+
+## Supported Harnesses
+
+| Harness | Environment variable(s) |
+|---|---|
+| Codex | `CODEX_THREAD_ID` |
+| Claude Code | `CLAUDE_CODE_SESSION_ID` |
+| OpenCode | `OPENCODE_SESSION_ID` |
+| DeepSeek Harness (`dsh`) | `DSH_SESSION_ID` |
+| Pi (`pi-coding-agent`) | `PI_SESSION_ID` |
+| Antigravity (`agy`) / Gemini CLI | `ANTIGRAVITY_SESSION_ID`, `GEMINI_SESSION_ID` |
+| Hermes Agent | `HERMES_SESSION_ID` |
+| Goose | `GOOSE_SESSION_ID` |
+| OpenClaw | `OPENCLAW_SESSION_ID`, `OPENCLAW_SESSION_KEY` |
+| Qoder | `QODER_SESSION_ID` |
+| Cursor | `CURSOR_SESSION_ID`, `CURSOR_TRACE_ID` |
+| Kiro | `KIRO_SESSION_ID` |
 
 ## Reliability boundaries
 
